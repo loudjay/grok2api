@@ -1,4 +1,4 @@
-<!DOCTYPE html>
+﻿<!DOCTYPE html>
 <html lang="zh-CN">
 
 <head>
@@ -9,8 +9,8 @@
   <script src="https://cdn.tailwindcss.com"></script>
   <link href="https://cdn.jsdelivr.net/npm/geist@1.0.0/dist/fonts/geist-sans/style.css" rel="stylesheet">
   <link href="https://cdn.jsdelivr.net/npm/geist@1.0.0/dist/fonts/geist-mono/style.css" rel="stylesheet">
-  <link href="/static/common/common.css" rel="stylesheet">
-  <link href="/static/chat/chat.css?v=1" rel="stylesheet">
+  <link href="/static/common/common.css?v=3" rel="stylesheet">
+  <link href="/static/chat/chat.css?v=2" rel="stylesheet">
   <link href="/static/common/toast.css" rel="stylesheet">
 </head>
 
@@ -18,12 +18,12 @@
   <div id="toast-container" class="toast-container"></div>
 
   <header class="border-b border-[var(--border)] bg-[var(--bg)]/80 backdrop-blur-md sticky top-0 z-10">
-    <div class="max-w-5xl mx-auto px-6 h-14 flex items-center justify-between">
+    <div class="chat-public-header max-w-5xl mx-auto px-6 h-14 flex items-center justify-between">
       <div class="flex items-center gap-3">
         <div class="font-semibold tracking-tight">Grok2API</div>
         <div class="text-xs text-[var(--accents-5)]">在线聊天</div>
       </div>
-      <div class="flex items-center gap-2">
+      <div class="chat-top-actions flex items-center gap-2">
         <a href="/login" class="geist-button-outline text-xs px-3 py-1.5">后台登录</a>
         <a href="/admin/chat" class="geist-button-outline text-xs px-3 py-1.5">后台聊天</a>
       </div>
@@ -47,7 +47,7 @@
           <input id="stream-toggle" type="checkbox" class="checkbox" checked>
           <label for="stream-toggle" class="text-sm">Stream</label>
         </div>
-        <div class="col-span-6 md:col-span-2 flex justify-end gap-2">
+        <div class="col-span-12 md:col-span-2 flex flex-wrap justify-end gap-2">
           <button class="geist-button-outline text-xs px-3" onclick="saveApiKey()">保存</button>
           <button class="geist-button-danger text-xs px-3" onclick="clearApiKey()">清除</button>
         </div>
@@ -70,7 +70,7 @@
             <button class="geist-button-outline text-xs px-3" onclick="pickChatImage()">上传图片</button>
             <div id="chat-attach-info" class="text-xs text-[var(--accents-5)]"></div>
             <div class="flex-1"></div>
-            <button class="geist-button text-xs px-4" onclick="sendChat()">发送</button>
+            <button class="geist-button text-xs px-4 composer-primary" onclick="sendChat()">发送</button>
           </div>
           <textarea id="chat-input" class="geist-input h-24" placeholder="输入消息..."></textarea>
           <div id="chat-attach-preview" class="attach-preview hidden"></div>
@@ -142,7 +142,7 @@
             <button class="geist-button-outline text-xs px-3" onclick="pickVideoImage()">上传参考图（可选）</button>
             <div id="video-attach-info" class="text-xs text-[var(--accents-5)]"></div>
             <div class="flex-1"></div>
-            <button class="geist-button text-xs px-4" onclick="generateVideo()">生成视频</button>
+            <button class="geist-button text-xs px-4 composer-primary" onclick="generateVideo()">生成视频</button>
           </div>
           <div id="video-attach-preview" class="attach-preview hidden"></div>
         </div>
@@ -157,4 +157,5 @@
 </body>
 
 </html>
+
 

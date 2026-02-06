@@ -237,7 +237,8 @@ adminRoutes.post("/api/v1/admin/config", requireAdminAuth, async (c) => {
       if (typeof appCfg.admin_username === "string") global_config.admin_username = appCfg.admin_username.trim() || "admin";
       if (typeof appCfg.app_key === "string") global_config.admin_password = appCfg.app_key.trim() || "admin";
       if (typeof appCfg.app_url === "string") global_config.base_url = appCfg.app_url.trim();
-      if (appCfg.image_format === "url" || appCfg.image_format === "base64") global_config.image_mode = appCfg.image_format;
+      if (appCfg.image_format === "url" || appCfg.image_format === "base64" || appCfg.image_format === "b64_json")
+        global_config.image_mode = appCfg.image_format;
     }
 
     if (grokCfg && typeof grokCfg === "object") {

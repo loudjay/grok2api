@@ -6,6 +6,7 @@ import { getSettings, normalizeCfCookie } from "../settings";
 import { isValidModel, MODEL_CONFIG } from "../grok/models";
 import { extractContent, buildConversationPayload, sendConversationRequest } from "../grok/conversation";
 import { uploadImage } from "../grok/upload";
+import { getDynamicHeaders } from "../grok/headers";
 import { createMediaPost, createPost } from "../grok/create";
 import { createOpenAiStreamFromGrokNdjson, parseOpenAiFromGrokNdjson } from "../grok/processor";
 import { addRequestLog } from "../repo/logs";
@@ -15,6 +16,7 @@ import { getApiKeyLimits } from "../repo/apiKeys";
 import { localDayString, tryConsumeDailyUsage, tryConsumeDailyUsageMulti } from "../repo/apiKeyUsage";
 import { nextLocalMidnightExpirationSeconds } from "../kv/cleanup";
 import { nowMs } from "../utils/time";
+import { arrayBufferToBase64 } from "../utils/base64";
 import { upsertCacheRow } from "../repo/cache";
 
 function openAiError(message: string, code: string): Record<string, unknown> {
@@ -168,9 +170,117 @@ function toProxyUrl(baseUrl: string, path: string): string {
   return `${baseUrl.replace(/\/$/, "")}/images/${path}`;
 }
 
-async function collectGeneratedImageUrls(resp: Response): Promise<string[]> {
+type ImageResponseFormat = "url" | "base64" | "b64_json";
+
+function resolveResponseFormat(raw: unknown, defaultMode: string): ImageResponseFormat | null {
+  const fallback = String(defaultMode || "url").trim().toLowerCase();
+  const candidate =
+    typeof raw === "string" && raw.trim() ? raw.trim().toLowerCase() : fallback;
+  if (candidate === "url" || candidate === "base64" || candidate === "b64_json") {
+    return candidate;
+  }
+  return null;
+}
+
+function responseFieldName(format: ImageResponseFormat): ImageResponseFormat {
+  return format;
+}
+
+function toBool(input: unknown): boolean {
+  if (typeof input === "boolean") return input;
+  if (typeof input === "number") return input === 1;
+  if (typeof input !== "string") return false;
+  const normalized = input.trim().toLowerCase();
+  return normalized === "true" || normalized === "1" || normalized === "yes";
+}
+
+function normalizeGeneratedImageUrls(input: unknown): string[] {
+  if (!Array.isArray(input)) return [];
+  return input
+    .filter((u): u is string => typeof u === "string")
+    .map((u) => u.trim())
+    .filter((u) => Boolean(u && u !== "/"));
+}
+
+function pickImageResults(images: string[], n: number): string[] {
+  if (images.length >= n) {
+    const pool = images.slice();
+    const picked: string[] = [];
+    while (picked.length < n && pool.length) {
+      const idx = Math.floor(Math.random() * pool.length);
+      const [item] = pool.splice(idx, 1);
+      if (item) picked.push(item);
+    }
+    return picked;
+  }
+  const picked = images.slice();
+  while (picked.length < n) picked.push("error");
+  return picked;
+}
+
+function normalizeImageMime(mime: string): string {
+  const m = (mime || "").trim().toLowerCase();
+  if (m === "image/jpg") return "image/jpeg";
+  return m;
+}
+
+function mimeFromFilename(filename: string): string | null {
+  const lower = filename.toLowerCase();
+  if (lower.endsWith(".jpg") || lower.endsWith(".jpeg")) return "image/jpeg";
+  if (lower.endsWith(".png")) return "image/png";
+  if (lower.endsWith(".webp")) return "image/webp";
+  return null;
+}
+
+async function fetchImageAsBase64(args: {
+  rawUrl: string;
+  cookie: string;
+  settings: Awaited<ReturnType<typeof getSettings>>["grok"];
+}): Promise<string> {
+  let url: URL;
+  try {
+    url = new URL(args.rawUrl);
+  } catch {
+    const p = args.rawUrl.startsWith("/") ? args.rawUrl : `/${args.rawUrl}`;
+    url = new URL(`https://assets.grok.com${p}`);
+  }
+
+  const headers = getDynamicHeaders(args.settings, url.pathname || "/");
+  headers.Cookie = args.cookie;
+  delete headers["Content-Type"];
+  headers.Accept = "image/avif,image/webp,image/*,*/*;q=0.8";
+  headers["Sec-Fetch-Dest"] = "image";
+  headers["Sec-Fetch-Mode"] = "no-cors";
+  headers["Sec-Fetch-Site"] = "same-site";
+  headers.Referer = "https://grok.com/";
+
+  const resp = await fetch(url.toString(), { method: "GET", headers, redirect: "follow" });
+  if (!resp.ok) {
+    const txt = await resp.text().catch(() => "");
+    throw new Error(`Image download failed: ${resp.status} ${txt.slice(0, 200)}`);
+  }
+  return arrayBufferToBase64(await resp.arrayBuffer());
+}
+
+async function convertRawUrlByFormat(
+  rawUrl: string,
+  responseFormat: ImageResponseFormat,
+  args: {
+    baseUrl: string;
+    cookie: string;
+    settings: Awaited<ReturnType<typeof getSettings>>["grok"];
+  },
+): Promise<string> {
+  if (responseFormat === "url") {
+    return toProxyUrl(args.baseUrl, encodeAssetPath(rawUrl));
+  }
+  return fetchImageAsBase64({ rawUrl, cookie: args.cookie, settings: args.settings });
+}
+
+async function collectImageUrls(resp: Response): Promise<string[]> {
   const text = await resp.text();
   const lines = text.split("\n").map((l) => l.trim()).filter(Boolean);
+  const allUrls: string[] = [];
   for (const line of lines) {
     let data: any;
     try {
@@ -181,12 +291,351 @@ async function collectGeneratedImageUrls(resp: Response): Promise<string[]> {
     const err = data?.error;
     if (err?.message) throw new Error(String(err.message));
     const grok = data?.result?.response;
-    const urls = grok?.modelResponse?.generatedImageUrls;
-    if (Array.isArray(urls)) {
-      return urls.filter((u: any) => typeof u === "string" && u.trim() && u.trim() !== "/").map((u: string) => u.trim());
-    }
+    const urls = normalizeGeneratedImageUrls(grok?.modelResponse?.generatedImageUrls);
+    if (urls.length) allUrls.push(...urls);
   }
-  return [];
+  return allUrls;
+}
+
+function buildImageSse(event: string, data: Record<string, unknown>): string {
+  return `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
+}
+
+function createImageEventStream(args: {
+  upstream: Response;
+  responseFormat: ImageResponseFormat;
+  baseUrl: string;
+  cookie: string;
+  settings: Awaited<ReturnType<typeof getSettings>>["grok"];
+  n: number;
+  onFinish?: (result: { status: number; duration: number }) => Promise<void> | void;
+}): ReadableStream<Uint8Array> {
+  const encoder = new TextEncoder();
+  const decoder = new TextDecoder();
+  const responseField = responseFieldName(args.responseFormat);
+  const targetIndex = args.n === 1 ? Math.floor(Math.random() * 2) : null;
+
+  return new ReadableStream<Uint8Array>({
+    async start(controller) {
+      const startedAt = Date.now();
+      const body = args.upstream.body;
+      if (!body) {
+        if (args.onFinish) {
+          await args.onFinish({ status: 500, duration: (Date.now() - startedAt) / 1000 });
+        }
+        controller.close();
+        return;
+      }
+
+      const reader = body.getReader();
+      const finalImages: string[] = [];
+      let buffer = "";
+      let failed = false;
+      try {
+        while (true) {
+          const { value, done } = await reader.read();
+          if (done) break;
+          if (!value) continue;
+          buffer += decoder.decode(value, { stream: true });
+          let idx = buffer.indexOf("\n");
+          while (idx >= 0) {
+            const line = buffer.slice(0, idx).trim();
+            buffer = buffer.slice(idx + 1);
+            if (!line) {
+              idx = buffer.indexOf("\n");
+              continue;
+            }
+
+            let data: any;
+            try {
+              data = JSON.parse(line);
+            } catch {
+              idx = buffer.indexOf("\n");
+              continue;
+            }
+
+            const err = data?.error;
+            if (err?.message) throw new Error(String(err.message));
+
+            const resp = data?.result?.response ?? {};
+            const progressInfo = resp.streamingImageGenerationResponse;
+            if (progressInfo) {
+              const imageIndex = Number(progressInfo.imageIndex ?? 0);
+              const progress = Number(progressInfo.progress ?? 0);
+              if (args.n === 1 && imageIndex !== targetIndex) {
+                idx = buffer.indexOf("\n");
+                continue;
+              }
+              const outIndex = args.n === 1 ? 0 : imageIndex;
+              controller.enqueue(
+                encoder.encode(
+                  buildImageSse("image_generation.partial_image", {
+                    type: "image_generation.partial_image",
+                    [responseField]: "",
+                    index: outIndex,
+                    progress,
+                  }),
+                ),
+              );
+            }
+
+            const rawUrls = normalizeGeneratedImageUrls(resp?.modelResponse?.generatedImageUrls);
+            if (rawUrls.length) {
+              for (const rawUrl of rawUrls) {
+                const converted = await convertRawUrlByFormat(rawUrl, args.responseFormat, {
+                  baseUrl: args.baseUrl,
+                  cookie: args.cookie,
+                  settings: args.settings,
+                });
+                finalImages.push(converted);
+              }
+            }
+            idx = buffer.indexOf("\n");
+          }
+        }
+
+        for (let i = 0; i < finalImages.length; i++) {
+          if (args.n === 1 && i !== targetIndex) continue;
+          const outIndex = args.n === 1 ? 0 : i;
+          controller.enqueue(
+            encoder.encode(
+              buildImageSse("image_generation.completed", {
+                type: "image_generation.completed",
+                [responseField]: finalImages[i] ?? "",
+                index: outIndex,
+                usage: {
+                  total_tokens: 50,
+                  input_tokens: 25,
+                  output_tokens: 25,
+                  input_tokens_details: { text_tokens: 5, image_tokens: 20 },
+                },
+              }),
+            ),
+          );
+        }
+        if (args.onFinish) {
+          await args.onFinish({ status: 200, duration: (Date.now() - startedAt) / 1000 });
+        }
+      } catch (e) {
+        failed = true;
+        console.error("Image stream processing failed:", e);
+        if (args.onFinish) {
+          await args.onFinish({ status: 500, duration: (Date.now() - startedAt) / 1000 });
+        }
+        controller.error(e);
+      } finally {
+        try {
+          reader.releaseLock();
+        } catch {
+          // ignore
+        }
+        if (!failed) controller.close();
+      }
+    },
+  });
+}
+
+function imageResponseData(field: ImageResponseFormat, values: string[]) {
+  return values.map((v) => ({ [field]: v }));
+}
+
+function getTokenSuffix(token: string): string {
+  return token.length >= 6 ? token.slice(-6) : token;
+}
+
+function parseImageCount(input: unknown): number {
+  const raw = Number(input ?? 1);
+  if (!Number.isFinite(raw)) return 1;
+  return Math.max(1, Math.min(10, Math.floor(raw)));
+}
+
+function parseImagePrompt(input: unknown): string {
+  return String(input ?? "").trim();
+}
+
+function parseImageModel(input: unknown): string {
+  return String(input ?? "grok-imagine-1.0").trim() || "grok-imagine-1.0";
+}
+
+function parseImageStream(input: unknown): boolean {
+  return toBool(input);
+}
+
+function parseAllowedImageMime(file: File): string | null {
+  const byMime = normalizeImageMime(String(file.type || ""));
+  if (byMime === "image/png" || byMime === "image/jpeg" || byMime === "image/webp") return byMime;
+  const byName = mimeFromFilename(String(file.name || ""));
+  if (byName) return byName;
+  return null;
+}
+
+function buildCookie(token: string, cf: string): string {
+  return cf ? `sso-rw=${token};sso=${token};${cf}` : `sso-rw=${token};sso=${token}`;
+}
+
+async function runImageCall(args: {
+  requestModel: string;
+  prompt: string;
+  fileIds: string[];
+  cookie: string;
+  settings: Awaited<ReturnType<typeof getSettings>>["grok"];
+  responseFormat: ImageResponseFormat;
+  baseUrl: string;
+}): Promise<string[]> {
+  const { payload, referer } = buildConversationPayload({
+    requestModel: args.requestModel,
+    content: args.prompt,
+    imgIds: args.fileIds,
+    imgUris: [],
+    settings: args.settings,
+  });
+  const upstream = await sendConversationRequest({
+    payload,
+    cookie: args.cookie,
+    settings: args.settings,
+    ...(referer ? { referer } : {}),
+  });
+  if (!upstream.ok) {
+    const txt = await upstream.text().catch(() => "");
+    throw new Error(`Upstream ${upstream.status}: ${txt.slice(0, 200)}`);
+  }
+  const rawUrls = await collectImageUrls(upstream);
+  const converted = await Promise.all(
+    rawUrls.map((rawUrl) =>
+      convertRawUrlByFormat(rawUrl, args.responseFormat, {
+        baseUrl: args.baseUrl,
+        cookie: args.cookie,
+        settings: args.settings,
+      }),
+    ),
+  );
+  return converted.filter(Boolean);
+}
+
+async function runImageStreamCall(args: {
+  requestModel: string;
+  prompt: string;
+  fileIds: string[];
+  cookie: string;
+  settings: Awaited<ReturnType<typeof getSettings>>["grok"];
+}): Promise<Response> {
+  const { payload, referer } = buildConversationPayload({
+    requestModel: args.requestModel,
+    content: args.prompt,
+    imgIds: args.fileIds,
+    imgUris: [],
+    settings: args.settings,
+  });
+  return sendConversationRequest({
+    payload,
+    cookie: args.cookie,
+    settings: args.settings,
+    ...(referer ? { referer } : {}),
+  });
+}
+
+function streamHeaders(): Record<string, string> {
+  return {
+    "Content-Type": "text/event-stream; charset=utf-8",
+    "Cache-Control": "no-cache",
+    Connection: "keep-alive",
+    "X-Accel-Buffering": "no",
+    "Access-Control-Allow-Origin": "*",
+  };
+}
+
+function isValidImageModel(model: string): boolean {
+  if (!isValidModel(model)) return false;
+  const cfg = MODEL_CONFIG[model];
+  return Boolean(cfg?.is_image_model);
+}
+
+function invalidResponseFormatMessage(): string {
+  return "response_format must be one of [\"b64_json\", \"base64\", \"url\"]";
+}
+
+function invalidStreamNMessage(): string {
+  return "Streaming is only supported when n=1 or n=2";
+}
+
+function imageUsagePayload(values: string[]) {
+  return {
+    total_tokens: 0 * values.filter((v) => v !== "error").length,
+    input_tokens: 0,
+    output_tokens: 0 * values.filter((v) => v !== "error").length,
+    input_tokens_details: { text_tokens: 0, image_tokens: 0 },
+  };
+}
+
+function createdTs(): number {
+  return Math.floor(Date.now() / 1000);
+}
+
+function buildImageJsonPayload(field: ImageResponseFormat, values: string[]) {
+  return {
+    created: createdTs(),
+    data: imageResponseData(field, values),
+    usage: imageUsagePayload(values),
+  };
+}
+
+async function recordImageLog(args: {
+  env: Env;
+  ip: string;
+  model: string;
+  start: number;
+  keyName: string;
+  status: number;
+  tokenSuffix?: string;
+  error: string;
+}) {
+  const duration = (Date.now() - args.start) / 1000;
+  await addRequestLog(args.env.DB, {
+    ip: args.ip,
+    model: args.model,
+    duration: Number(duration.toFixed(2)),
+    status: args.status,
+    key_name: args.keyName,
+    token_suffix: args.tokenSuffix ?? "",
+    error: args.error,
+  });
+}
+
+function listImageFiles(form: FormData): File[] {
+  return [...form.getAll("image"), ...form.getAll("image[]")].filter(
+    (item): item is File => item instanceof File,
+  );
+}
+
+function nonEmptyPromptOrError(prompt: string) {
+  if (prompt) return null;
+  return { message: "Missing 'prompt'", code: "missing_prompt" };
+}
+
+function invalidModelOrError(model: string) {
+  if (!isValidModel(model)) return { message: `Model '${model}' not supported`, code: "model_not_supported" };
+  if (!isValidImageModel(model)) return { message: `Model '${model}' is not an image model`, code: "invalid_model" };
+  return null;
+}
+
+function baseUrlFromSettings(settingsBundle: Awaited<ReturnType<typeof getSettings>>, origin: string): string {
+  return (settingsBundle.global.base_url ?? "").trim() || origin;
+}
+
+function imageCallPrompt(kind: "generation" | "edit", prompt: string): string {
+  return kind === "edit" ? `Image Edit: ${prompt}` : `Image Generation: ${prompt}`;
+}
+
+function imageFormatDefault(settingsBundle: Awaited<ReturnType<typeof getSettings>>): string {
+  return String(settingsBundle.global.image_mode ?? "url");
+}
+
+function parseResponseFormatOrError(raw: unknown, defaultMode: string) {
+  const resolved = resolveResponseFormat(raw, defaultMode);
+  if (!resolved) {
+    return { error: { message: invalidResponseFormatMessage(), code: "invalid_response_format" } };
+  }
+  return { value: resolved };
 }
 
 openAiRoutes.get("/models", async (c) => {
@@ -433,18 +882,42 @@ openAiRoutes.post("/images/generations", async (c) => {
 
   let requestedModel = "grok-imagine-1.0";
   try {
-    const body = (await c.req.json()) as { prompt?: string; model?: string; n?: number };
-    const prompt = String(body.prompt ?? "").trim();
-    if (!prompt) return c.json(openAiError("Missing 'prompt'", "missing_prompt"), 400);
+    const body = (await c.req.json()) as {
+      prompt?: unknown;
+      model?: unknown;
+      n?: unknown;
+      stream?: unknown;
+      response_format?: unknown;
+    };
+    const prompt = parseImagePrompt(body.prompt);
+    const promptErr = nonEmptyPromptOrError(prompt);
+    if (promptErr) return c.json(openAiError(promptErr.message, promptErr.code), 400);
 
-    requestedModel = String(body.model ?? "grok-imagine-1.0").trim() || "grok-imagine-1.0";
-    if (!isValidModel(requestedModel))
-      return c.json(openAiError(`Model '${requestedModel}' not supported`, "model_not_supported"), 400);
-    const cfg = MODEL_CONFIG[requestedModel]!;
-    if (!cfg.is_image_model) return c.json(openAiError(`Model '${requestedModel}' is not an image model`, "invalid_model"), 400);
+    requestedModel = parseImageModel(body.model);
+    const modelErr = invalidModelOrError(requestedModel);
+    if (modelErr) return c.json(openAiError(modelErr.message, modelErr.code), 400);
 
-    const nRaw = Number(body.n ?? 1);
-    const n = Number.isFinite(nRaw) ? Math.max(1, Math.min(10, Math.floor(nRaw))) : 1;
+    const n = parseImageCount(body.n);
+    const stream = parseImageStream(body.stream);
+    if (stream && ![1, 2].includes(n)) {
+      return c.json(openAiError(invalidStreamNMessage(), "invalid_stream_n"), 400);
+    }
+
+    const settingsBundle = await getSettings(c.env);
+    const parsedResponseFormat = parseResponseFormatOrError(
+      body.response_format,
+      imageFormatDefault(settingsBundle),
+    );
+    if ("error" in parsedResponseFormat) {
+      return c.json(
+        openAiError(parsedResponseFormat.error.message, parsedResponseFormat.error.code),
+        400,
+      );
+    }
+    const responseFormat = parsedResponseFormat.value;
+    const responseField = responseFieldName(responseFormat);
+    const baseUrl = baseUrlFromSettings(settingsBundle, origin);
+    const cf = normalizeCfCookie(settingsBundle.grok.cf_clearance ?? "");
 
     const quota = await enforceQuota({
       env: c.env,
@@ -455,67 +928,271 @@ openAiRoutes.post("/images/generations", async (c) => {
     });
     if (!quota.ok) return quota.resp;
 
-    const settingsBundle = await getSettings(c.env);
-    const cf = normalizeCfCookie(settingsBundle.grok.cf_clearance ?? "");
-
-    const calls = Math.ceil(n / 2);
-    const baseUrl = (settingsBundle.global.base_url ?? "").trim() || origin;
-
-    const doOne = async (): Promise<string[]> => {
+    if (stream) {
       const chosen = await selectBestToken(c.env.DB, requestedModel);
-      if (!chosen) throw new Error("No available token");
-      const cookie = cf ? `sso-rw=${chosen.token};sso=${chosen.token};${cf}` : `sso-rw=${chosen.token};sso=${chosen.token}`;
-      const { payload, referer } = buildConversationPayload({
+      if (!chosen) return c.json(openAiError("No available token", "NO_AVAILABLE_TOKEN"), 503);
+      const cookie = buildCookie(chosen.token, cf);
+
+      const upstream = await runImageStreamCall({
         requestModel: requestedModel,
-        content: `Image Generation:${prompt}`,
-        imgIds: [],
-        imgUris: [],
-        settings: settingsBundle.grok,
-      });
-      const upstream = await sendConversationRequest({
-        payload,
+        prompt: imageCallPrompt("generation", prompt),
+        fileIds: [],
         cookie,
         settings: settingsBundle.grok,
-        ...(referer ? { referer } : {}),
       });
       if (!upstream.ok) {
         const txt = await upstream.text().catch(() => "");
         await recordTokenFailure(c.env.DB, chosen.token, upstream.status, txt.slice(0, 200));
         await applyCooldown(c.env.DB, chosen.token, upstream.status);
-        throw new Error(`Upstream ${upstream.status}: ${txt.slice(0, 200)}`);
+        await recordImageLog({
+          env: c.env,
+          ip,
+          model: requestedModel,
+          start,
+          keyName,
+          status: upstream.status,
+          tokenSuffix: getTokenSuffix(chosen.token),
+          error: txt.slice(0, 200),
+        });
+        return c.json(openAiError(`Upstream ${upstream.status}`, "upstream_error"), 500);
       }
-      const rawUrls = await collectGeneratedImageUrls(upstream);
-      return rawUrls.map((u) => toProxyUrl(baseUrl, encodeAssetPath(u)));
-    };
 
-    const urlsNested = await mapLimit(Array.from({ length: calls }).map((_, i) => i), 3, async () => doOne());
+      const streamBody = createImageEventStream({
+        upstream,
+        responseFormat,
+        baseUrl,
+        cookie,
+        settings: settingsBundle.grok,
+        n,
+        onFinish: async ({ status, duration }) => {
+          await addRequestLog(c.env.DB, {
+            ip,
+            model: requestedModel,
+            duration: Number(duration.toFixed(2)),
+            status,
+            key_name: keyName,
+            token_suffix: getTokenSuffix(chosen.token),
+            error: status === 200 ? "" : "stream_error",
+          });
+        },
+      });
+      return new Response(streamBody, { status: 200, headers: streamHeaders() });
+    }
+
+    const calls = Math.ceil(n / 2);
+    const urlsNested = await mapLimit(Array.from({ length: calls }), 3, async () => {
+      const chosen = await selectBestToken(c.env.DB, requestedModel);
+      if (!chosen) throw new Error("No available token");
+      const cookie = buildCookie(chosen.token, cf);
+      try {
+        return await runImageCall({
+          requestModel: requestedModel,
+          prompt: imageCallPrompt("generation", prompt),
+          fileIds: [],
+          cookie,
+          settings: settingsBundle.grok,
+          responseFormat,
+          baseUrl,
+        });
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        await recordTokenFailure(c.env.DB, chosen.token, 500, msg.slice(0, 200));
+        await applyCooldown(c.env.DB, chosen.token, 500);
+        throw e;
+      }
+    });
     const urls = urlsNested.flat().filter(Boolean);
-    const selected = urls.slice(0, n);
+    const selected = pickImageResults(urls, n);
 
-    const duration = (Date.now() - start) / 1000;
-    await addRequestLog(c.env.DB, {
+    await recordImageLog({
+      env: c.env,
       ip,
       model: requestedModel,
-      duration: Number(duration.toFixed(2)),
+      start,
+      keyName,
       status: 200,
-      key_name: keyName,
-      token_suffix: "",
       error: "",
     });
 
-    return c.json({
-      created: Math.floor(Date.now() / 1000),
-      data: selected.map((url) => ({ url })),
-    });
+    return c.json(buildImageJsonPayload(responseField, selected));
   } catch (e) {
-    const duration = (Date.now() - start) / 1000;
-    await addRequestLog(c.env.DB, {
+    await recordImageLog({
+      env: c.env,
       ip,
       model: requestedModel || "image",
-      duration: Number(duration.toFixed(2)),
+      start,
+      keyName,
       status: 500,
-      key_name: keyName,
-      token_suffix: "",
+      error: e instanceof Error ? e.message : String(e),
+    });
+    return c.json(openAiError(e instanceof Error ? e.message : "Internal error", "internal_error"), 500);
+  }
+});
+
+openAiRoutes.post("/images/edits", async (c) => {
+  const start = Date.now();
+  const ip = getClientIp(c.req.raw);
+  const keyName = c.get("apiAuth").name ?? "Unknown";
+  const origin = new URL(c.req.url).origin;
+  const maxImageBytes = 50 * 1024 * 1024;
+
+  let requestedModel = "grok-imagine-1.0";
+  try {
+    const form = await c.req.formData();
+    const prompt = parseImagePrompt(form.get("prompt"));
+    const promptErr = nonEmptyPromptOrError(prompt);
+    if (promptErr) return c.json(openAiError(promptErr.message, promptErr.code), 400);
+
+    requestedModel = parseImageModel(form.get("model"));
+    const modelErr = invalidModelOrError(requestedModel);
+    if (modelErr) return c.json(openAiError(modelErr.message, modelErr.code), 400);
+
+    const n = parseImageCount(form.get("n"));
+    const stream = parseImageStream(form.get("stream"));
+    if (stream && ![1, 2].includes(n)) {
+      return c.json(openAiError(invalidStreamNMessage(), "invalid_stream_n"), 400);
+    }
+
+    const files = listImageFiles(form);
+    if (!files.length) return c.json(openAiError("Image is required", "missing_image"), 400);
+    if (files.length > 16) {
+      return c.json(openAiError("Too many images. Maximum is 16.", "invalid_image_count"), 400);
+    }
+
+    const settingsBundle = await getSettings(c.env);
+    const parsedResponseFormat = parseResponseFormatOrError(
+      form.get("response_format"),
+      imageFormatDefault(settingsBundle),
+    );
+    if ("error" in parsedResponseFormat) {
+      return c.json(
+        openAiError(parsedResponseFormat.error.message, parsedResponseFormat.error.code),
+        400,
+      );
+    }
+    const responseFormat = parsedResponseFormat.value;
+    const responseField = responseFieldName(responseFormat);
+    const baseUrl = baseUrlFromSettings(settingsBundle, origin);
+
+    const quota = await enforceQuota({
+      env: c.env,
+      apiAuth: c.get("apiAuth"),
+      model: requestedModel,
+      kind: "image",
+      imageCount: n,
+    });
+    if (!quota.ok) return quota.resp;
+
+    const chosen = await selectBestToken(c.env.DB, requestedModel);
+    if (!chosen) return c.json(openAiError("No available token", "NO_AVAILABLE_TOKEN"), 503);
+    const cf = normalizeCfCookie(settingsBundle.grok.cf_clearance ?? "");
+    const cookie = buildCookie(chosen.token, cf);
+
+    const fileIds: string[] = [];
+    for (const file of files) {
+      const bytes = await file.arrayBuffer();
+      if (bytes.byteLength <= 0) {
+        return c.json(openAiError("File content is empty", "empty_file"), 400);
+      }
+      if (bytes.byteLength > maxImageBytes) {
+        return c.json(openAiError("Image file too large. Maximum is 50MB.", "file_too_large"), 400);
+      }
+
+      const mime = parseAllowedImageMime(file);
+      if (!mime) {
+        return c.json(
+          openAiError("Unsupported image type. Supported: png, jpg, webp.", "invalid_image_type"),
+          400,
+        );
+      }
+
+      const dataUrl = `data:${mime};base64,${arrayBufferToBase64(bytes)}`;
+      const uploaded = await uploadImage(dataUrl, cookie, settingsBundle.grok);
+      if (uploaded.fileId) fileIds.push(uploaded.fileId);
+    }
+
+    if (stream) {
+      const upstream = await runImageStreamCall({
+        requestModel: requestedModel,
+        prompt: imageCallPrompt("edit", prompt),
+        fileIds,
+        cookie,
+        settings: settingsBundle.grok,
+      });
+      if (!upstream.ok) {
+        const txt = await upstream.text().catch(() => "");
+        await recordTokenFailure(c.env.DB, chosen.token, upstream.status, txt.slice(0, 200));
+        await applyCooldown(c.env.DB, chosen.token, upstream.status);
+        await recordImageLog({
+          env: c.env,
+          ip,
+          model: requestedModel,
+          start,
+          keyName,
+          status: upstream.status,
+          tokenSuffix: getTokenSuffix(chosen.token),
+          error: txt.slice(0, 200),
+        });
+        return c.json(openAiError(`Upstream ${upstream.status}`, "upstream_error"), 500);
+      }
+
+      const streamBody = createImageEventStream({
+        upstream,
+        responseFormat,
+        baseUrl,
+        cookie,
+        settings: settingsBundle.grok,
+        n,
+        onFinish: async ({ status, duration }) => {
+          await addRequestLog(c.env.DB, {
+            ip,
+            model: requestedModel,
+            duration: Number(duration.toFixed(2)),
+            status,
+            key_name: keyName,
+            token_suffix: getTokenSuffix(chosen.token),
+            error: status === 200 ? "" : "stream_error",
+          });
+        },
+      });
+      return new Response(streamBody, { status: 200, headers: streamHeaders() });
+    }
+
+    const calls = Math.ceil(n / 2);
+    const urlsNested = await mapLimit(Array.from({ length: calls }), 3, async () => {
+      return runImageCall({
+        requestModel: requestedModel,
+        prompt: imageCallPrompt("edit", prompt),
+        fileIds,
+        cookie,
+        settings: settingsBundle.grok,
+        responseFormat,
+        baseUrl,
+      });
+    });
+    const urls = urlsNested.flat().filter(Boolean);
+    const selected = pickImageResults(urls, n);
+
+    await recordImageLog({
+      env: c.env,
+      ip,
+      model: requestedModel,
+      start,
+      keyName,
+      status: 200,
+      tokenSuffix: getTokenSuffix(chosen.token),
+      error: "",
+    });
+
+    return c.json(buildImageJsonPayload(responseField, selected));
+  } catch (e) {
+    await recordImageLog({
+      env: c.env,
+      ip,
+      model: requestedModel || "image",
+      start,
+      keyName,
+      status: 500,
       error: e instanceof Error ? e.message : String(e),
     });
     return c.json(openAiError(e instanceof Error ? e.message : "Internal error", "internal_error"), 500);

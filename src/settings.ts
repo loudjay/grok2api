@@ -5,7 +5,7 @@ import { nowMs } from "./utils/time";
 export interface GlobalSettings {
   base_url?: string;
   log_level?: string;
-  image_mode?: "url" | "base64";
+  image_mode?: "url" | "base64" | "b64_json";
   admin_username?: string;
   admin_password?: string;
   image_cache_max_size_mb?: number;

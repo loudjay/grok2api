@@ -17,6 +17,7 @@ This fork additionally provides a **Cloudflare Workers / Pages** deployment (Typ
 
 - Deployment guide: `README.cloudflare.md`
 - One-click GitHub Actions workflow: `.github/workflows/cloudflare-workers.yml`
+  - Prerequisite for one-click workflow: repository secrets `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID`.
 
 ## Usage
 
@@ -60,7 +61,7 @@ python scripts/smoke_test.py --base-url http://127.0.0.1:8000
 > Optional: copy `.env.example` to `.env` to configure port/logging/storage. You can also set `COMPOSE_PROFILES` to enable `redis/pgsql/mysql` with one compose file (see examples in `.env.example`).
 
 > Deployment consistency: Local (FastAPI), Docker, and Cloudflare Workers share the same admin behavior semantics (token filters, API key management, and admin API responses).
-> Cloudflare keeps one-click deployment via `.github/workflows/cloudflare-workers.yml`, and Docker keeps one-command startup via `docker compose up -d`.
+> Cloudflare keeps one-click deployment via `.github/workflows/cloudflare-workers.yml` (with the two required secrets configured), and Docker keeps one-command startup via `docker compose up -d`.
 
 ### Admin panel
 
@@ -73,6 +74,15 @@ Pages:
 - `http://<host>:8000/admin/datacenter`: Data center (metrics + log viewer)
 - `http://<host>:8000/admin/config`: Configuration (including auto register settings)
 - `http://<host>:8000/admin/cache`: Cache management (local cache + online assets)
+
+### Mobile Responsiveness (Site-wide)
+
+- Covered pages: `/login`, `/admin/token`, `/admin/keys`, `/admin/cache`, `/admin/config`, `/admin/datacenter`, `/chat`, `/admin/chat`.
+- Admin top navigation now uses a mobile drawer (open/close, click-mask-to-close, auto-close on link click, `Esc` to close).
+- Tables keep a horizontal-scroll-first strategy on mobile (no forced card conversion).
+- Toast notifications are edge-aware on narrow screens (no fixed minimum width overflow).
+- Bottom batch action bars (Token/Cache) switch to full-width bottom cards on mobile to reduce interaction blocking.
+- Same behavior across Local FastAPI, Docker, and Cloudflare Workers because they share the same static frontend assets.
 
 ### Token Management Enhancements (Filters + State Rules)
 
@@ -91,6 +101,9 @@ Pages:
 - New stat cards: total, active, inactive, exhausted today.
 - Toolbar supports search (name/key), status filter (all/active/inactive/exhausted), and reset.
 - Create/edit modal improvements:
+  - Centered floating modal with mask + entrance animation
+  - Click mask or press `Esc` to close
+  - Responsive modal grid and scroll behavior on mobile
   - Auto-generate key
   - Quick quota presets (recommended/unlimited)
   - Disable submit button while submitting (prevent duplicate submit)
@@ -207,8 +220,44 @@ curl http://localhost:8000/v1/images/generations \
 | `prompt` | string | Prompt | - |
 | `n` | integer | Number of images | `1` - `10` (streaming: `1` or `2` only) |
 | `stream` | boolean | Enable streaming | `true`, `false` |
+| `response_format` | string | Output format | `url`, `base64`, `b64_json` (defaults to `app.image_format`) |
 
 Note: any other parameters will be discarded and ignored.
+
+<br>
+
+</details>
+
+<br>
+
+### `POST /v1/images/edits`
+> Image edit endpoint (`multipart/form-data`)
+
+```bash
+curl http://localhost:8000/v1/images/edits \
+  -H "Authorization: Bearer $GROK2API_API_KEY" \
+  -F "model=grok-imagine-1.0" \
+  -F "prompt=Add sunglasses to this cat" \
+  -F "image=@./cat.png" \
+  -F "n=1" \
+  -F "response_format=url"
+```
+
+<details>
+<summary>Supported request parameters</summary>
+
+<br>
+
+| Field | Type | Description | Allowed values |
+| :--- | :--- | :--- | :--- |
+| `model` | string | Image model ID | `grok-imagine-1.0` |
+| `prompt` | string | Edit prompt | - |
+| `image` | file[] | Source image(s), up to 16 files | `png`, `jpg`, `jpeg`, `webp` |
+| `n` | integer | Number of images | `1` - `10` (streaming: `1` or `2` only) |
+| `stream` | boolean | Enable streaming | `true`, `false` |
+| `response_format` | string | Output format | `url`, `base64`, `b64_json` (defaults to `app.image_format`) |
+
+Note: `mask` is currently ignored.
 
 <br>
 
@@ -251,7 +300,7 @@ When upgrading from older versions, the service will keep existing local data an
 | | `admin_username` | Admin username | Username for the Grok2API admin panel. | `admin` |
 | | `app_key` | Admin password | Password for the Grok2API admin panel. | `admin` |
 | | `api_key` | API key | Bearer token required to call Grok2API. | `""` |
-| | `image_format` | Image format | Output image format (`url` or `base64`). | `url` |
+| | `image_format` | Image format | Output image format (`url`, `base64`, or `b64_json`). | `url` |
 | | `video_format` | Video format | Output video format (url only). | `url` |
 | **grok** | `temporary` | Temporary chat | Enable temporary conversation mode. | `true` |
 | | `stream` | Streaming | Enable streaming by default. | `true` |

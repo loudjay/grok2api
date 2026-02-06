@@ -104,8 +104,14 @@
 .composer-row {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 10px;
   margin-bottom: 10px;
+}
+
+.composer-primary {
+  flex-shrink: 0;
+  min-width: 86px;
 }
 
 .attach-preview {
@@ -161,3 +167,74 @@
   display: block;
 }
 
+@media (max-width: 1024px) {
+  .chat-messages {
+    height: 360px;
+  }
+
+  .results-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 767px) {
+  .chat-public-header {
+    height: auto;
+    min-height: 56px;
+    align-items: flex-start;
+    flex-wrap: wrap;
+    gap: 8px;
+    padding-top: 8px;
+    padding-bottom: 8px;
+  }
+
+  .chat-top-actions {
+    width: 100%;
+    flex-wrap: wrap;
+  }
+
+  .chat-top-actions a {
+    flex: 1 1 140px;
+  }
+
+  .chat-messages {
+    height: 300px;
+    padding: 10px;
+  }
+
+  .msg {
+    flex-direction: column;
+    gap: 6px;
+  }
+
+  .msg-role {
+    width: auto;
+    font-size: 11px;
+  }
+
+  .composer-row {
+    align-items: stretch;
+    gap: 8px;
+  }
+
+  #chat-attach-info,
+  #video-attach-info {
+    width: 100%;
+  }
+
+  .composer-row .flex-1 {
+    display: none;
+  }
+
+  .composer-primary {
+    width: 100%;
+  }
+
+  .attach-preview {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .results-grid {
+    grid-template-columns: 1fr;
+  }
+}

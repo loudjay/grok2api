@@ -3,6 +3,9 @@ let cachedRows = [];
 let displayRows = [];
 let editingKey = null;
 let isSubmitting = false;
+let keyModalEscBound = false;
+const MODAL_TRANSITION_MS = 200;
+let keyModalHideTimer = null;
 
 const keyFilterState = {
   search: '',
@@ -292,7 +295,7 @@ function buildLimitsPayload() {
 
 function openCreateModal() {
   editingKey = null;
-  q('modal-title').textContent = '新增 API Key';
+  q('key-modal-title').textContent = '新增 API Key';
   q('key-name').value = '';
   q('key-value').value = '';
   q('key-value').disabled = false;
@@ -304,12 +307,21 @@ function openCreateModal() {
   const btn = q('submit-btn');
   if (btn) btn.dataset.idleLabel = '创建';
   setSubmitState(false);
-  q('key-modal').classList.remove('hidden');
+  const modal = q('key-modal');
+  if (!modal) return;
+  if (keyModalHideTimer) {
+    clearTimeout(keyModalHideTimer);
+    keyModalHideTimer = null;
+  }
+  modal.classList.remove('hidden');
+  requestAnimationFrame(() => {
+    modal.classList.add('is-open');
+  });
 }
 
 function openEditModal(row) {
   editingKey = String(row.key || '');
-  q('modal-title').textContent = '编辑 API Key';
+  q('key-modal-title').textContent = '编辑 API Key';
   q('key-name').value = String(row.name || '');
   q('key-value').value = String(row.key || '');
   q('key-value').disabled = true;
@@ -321,11 +333,27 @@ function openEditModal(row) {
   const btn = q('submit-btn');
   if (btn) btn.dataset.idleLabel = '保存';
   setSubmitState(false);
-  q('key-modal').classList.remove('hidden');
+  const modal = q('key-modal');
+  if (!modal) return;
+  if (keyModalHideTimer) {
+    clearTimeout(keyModalHideTimer);
+    keyModalHideTimer = null;
+  }
+  modal.classList.remove('hidden');
+  requestAnimationFrame(() => {
+    modal.classList.add('is-open');
+  });
 }
 
 function closeKeyModal() {
-  q('key-modal').classList.add('hidden');
+  const modal = q('key-modal');
+  if (!modal) return;
+  modal.classList.remove('is-open');
+  if (keyModalHideTimer) clearTimeout(keyModalHideTimer);
+  keyModalHideTimer = window.setTimeout(() => {
+    modal.classList.add('hidden');
+    keyModalHideTimer = null;
+  }, MODAL_TRANSITION_MS);
 }
 
 function generateKeyValue() {
@@ -485,6 +513,18 @@ function resetKeyFilters() {
 async function init() {
   apiKey = await ensureApiKey();
   if (apiKey === null) return;
+  const modal = q('key-modal');
+  if (modal && !keyModalEscBound) {
+    modal.addEventListener('click', (event) => {
+      if (event.target === modal) closeKeyModal();
+    });
+    document.addEventListener('keydown', (event) => {
+      if (event.key !== 'Escape') return;
+      if (modal.classList.contains('hidden')) return;
+      closeKeyModal();
+    });
+    keyModalEscBound = true;
+  }
   await loadKeys();
 }
 
