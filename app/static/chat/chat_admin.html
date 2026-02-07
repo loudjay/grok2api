@@ -10,7 +10,7 @@
   <link href="https://cdn.jsdelivr.net/npm/geist@1.0.0/dist/fonts/geist-sans/style.css" rel="stylesheet">
   <link href="https://cdn.jsdelivr.net/npm/geist@1.0.0/dist/fonts/geist-mono/style.css" rel="stylesheet">
   <link href="/static/common/common.css?v=3" rel="stylesheet">
-  <link href="/static/chat/chat.css?v=2" rel="stylesheet">
+  <link href="/static/chat/chat.css?v=3" rel="stylesheet">
   <link href="/static/common/toast.css" rel="stylesheet">
   <script>
     window.__CHAT_ADMIN__ = true;
@@ -69,8 +69,11 @@
       </div>
 
       <div id="panel-image" class="panel hidden">
+        <div id="image-mode-hint" class="text-xs text-[var(--accents-5)] mb-2 hidden">
+          当前为新生图方式：支持实时瀑布流、宽高比与并发数量。
+        </div>
         <div class="grid grid-cols-12 gap-3 items-end">
-          <div class="col-span-12 md:col-span-8">
+          <div class="col-span-12 md:col-span-4">
             <label class="field-label">Prompt</label>
             <textarea id="image-prompt" class="geist-input h-24" placeholder="描述你要生成的图片..."></textarea>
           </div>
@@ -78,7 +81,25 @@
             <label class="field-label">数量 n</label>
             <input id="image-n" type="number" class="geist-input" min="1" max="10" value="1" />
           </div>
-          <div class="col-span-6 md:col-span-2 flex justify-end">
+          <div id="image-aspect-wrap" class="col-span-6 md:col-span-2 hidden">
+            <label class="field-label">宽高比</label>
+            <select id="image-aspect" class="geist-input h-[34px]">
+              <option value="2:3">2:3</option>
+              <option value="1:1">1:1</option>
+              <option value="3:2">3:2</option>
+              <option value="16:9">16:9</option>
+              <option value="9:16">9:16</option>
+            </select>
+          </div>
+          <div id="image-concurrency-wrap" class="col-span-6 md:col-span-2 hidden">
+            <label class="field-label">并发数量</label>
+            <select id="image-concurrency" class="geist-input h-[34px]">
+              <option value="1">1</option>
+              <option value="2">2</option>
+              <option value="3">3</option>
+            </select>
+          </div>
+          <div class="col-span-12 md:col-span-2 flex justify-end">
             <button class="geist-button text-xs px-4" onclick="generateImage()">生成</button>
           </div>
         </div>
@@ -149,7 +170,7 @@
   <script src="/static/common/admin-auth.js"></script>
   <script src="/static/common/header.js?v=3"></script>
   <script src="/static/common/footer.js"></script>
-  <script src="/static/chat/chat.js?v=1"></script>
+  <script src="/static/chat/chat.js?v=3"></script>
 </body>
 
 </html>

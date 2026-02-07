@@ -186,33 +186,29 @@ python scripts/smoke_test.py --base-url https://<你的域名或workers.dev>
    - 或者关闭动态并填写 `x_statsig_id`
    - （可选）填写 `cf_clearance`（只填值，不要 `cf_clearance=` 前缀）
    - （可选）开启 `video_poster_preview`：将返回内容中的 `<video>` 替换为 Poster 预览图（默认关闭）
+   - （可选）`image_generation_method`：`legacy`（默认，稳定）或 `imagine_ws_experimental`（实验性新方法，失败自动回退旧方法）
 3. **Keys**：创建 API Key，用于调用 `/v1/*`
 
 ---
 
 ## 8) 接口
 
-- `POST /v1/chat/completions`（支持 `stream: true`）
-- `GET /v1/models`
-- `GET /images/<img_path>`：从 KV 读缓存，未命中则抓取 `assets.grok.com` 并写入 KV（并在每天 0 点过期/清除）
-- 注意：KV 单条数据有大小限制（建议 ≤ 25MB），且大多数视频播放器会发起 Range 请求；Range 场景会直接代理上游，不一定会命中 KV 缓存。
-- 管理后台 API：`/api/*`（用于管理页）
+- POST /v1/chat/completions (supports stream: true)
+- GET /v1/models
+- GET /v1/images/method: returns current image-generation mode (legacy or imagine_ws_experimental) for /chat and /admin/chat UI switching
+- POST /v1/images/generations: experimental mode supports size (aspect-ratio mapping) and concurrency (1..3)
+- POST /v1/images/edits: only accepts grok-imagine-1.0-edit
+- GET /images/<img_path>: reads from KV cache; on miss fetches assets.grok.com and writes back to KV (daily expiry/cleanup policy)
+- Note: Workers KV single-value size is limited (recommended <= 25MB); most video players use Range requests, which may bypass KV hits
+- Admin APIs: /api/*
 
 ### 8.1) 管理后台 API 兼容语义（与 FastAPI 一致）
 
-- `GET /api/v1/admin/tokens` 返回项新增（增量兼容）：
-  - `token_type`
-  - `quota_known`
-  - `heavy_quota`
-  - `heavy_quota_known`
-- `POST /api/v1/admin/keys/update`：
-  - 当 key 不存在时返回 `404`
-- 额度语义：
-  - `remaining_queries = -1` 表示额度未知（unknown quota semantics）
-  - 前端应结合 `quota_known` / `heavy_quota_known` 判断，不应将未知额度直接判定为“额度用尽”
+- GET /api/v1/admin/tokens adds fields (compatible): token_type, quota_known, heavy_quota, heavy_quota_known
+- POST /api/v1/admin/keys/update returns 404 when key does not exist
+- Quota semantics: remaining_queries = -1 means unknown quota; frontend should use quota_known / heavy_quota_known for judgement
 
 ---
-
 ## 9) 部署到 Pages（可选，但不推荐用于“定时清理”）
 
 仓库已提供 Pages Advanced Mode 入口：

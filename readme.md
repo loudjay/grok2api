@@ -176,6 +176,7 @@ python scripts/smoke_test.py --base-url http://127.0.0.1:8000
 | `grok-4.1`               |  1  | Basic/Super |   支持   |   支持   |    -    |
 | `grok-4.1-thinking`      |  4  | Basic/Super |   支持   |   支持   |    -    |
 | `grok-imagine-1.0`       |  4  | Basic/Super |    -    |   支持   |    -    |
+| `grok-imagine-1.0-edit`  |  4  | Basic/Super |    -    |   支持   |    -    |
 | `grok-imagine-1.0-video` |  -  | Basic/Super |    -    |    -    |   支持   |
 
 <br>
@@ -221,7 +222,7 @@ curl http://localhost:8000/v1/chat/completions \
 
 ### `POST /v1/images/generations`
 
-> 图像接口，支持图像生成、图像编辑
+> 图像生成接口
 
 ```bash
 curl http://localhost:8000/v1/images/generations \
@@ -239,19 +240,43 @@ curl http://localhost:8000/v1/images/generations \
 
 <br>
 
-| 字段       | 类型    | 说明             | 可用参数                                     |
-| :--------- | :------ | :--------------- | :------------------------------------------- |
-| `model`  | string  | 图像模型名       | `grok-imagine-1.0`                         |
-| `prompt` | string  | 图像描述提示词   | -                                            |
-| `n`      | integer | 生成数量         | `1` - `10` (流式模式仅限 `1` 或 `2`) |
-| `stream` | boolean | 是否开启流式输出 | `true`, `false`                          |
+| 字段 | 类型 | 说明 | 可用参数 |
+| :--- | :--- | :--- | :--- |
+| `model` | string | 图像模型名 | `grok-imagine-1.0` |
+| `prompt` | string | 图像描述提示词 | - |
+| `n` | integer | 生成数量 | `1` - `10`（流式仅 `1` 或 `2`） |
+| `stream` | boolean | 是否开启流式输出 | `true`, `false` |
+| `size` | string | 图片尺寸/比例 | `1024x1024`、`16:9`、`9:16`、`1:1`、`2:3`、`3:2` |
+| `concurrency` | integer | 新方式并发数 | `1` - `3`（仅新生图方式生效） |
 | `response_format` | string | 图片返回格式 | `url`, `base64`, `b64_json`（默认跟随 `app.image_format`） |
 
-注：除上述外的其他参数将自动丢弃并忽略
+注：
+- 当 `grok.image_generation_method=imagine_ws_experimental` 时，支持实时 SSE 生图瀑布流；无法持续流式时仍保持 SSE 并在结束后返回完成事件。
+- `size` 在新方式下会映射为比例：`1024x576/1280x720/1536x864 -> 16:9`，`576x1024/720x1280/864x1536 -> 9:16`，`1024x1024/512x512 -> 1:1`，`1024x1536/512x768/768x1024 -> 2:3`，`1536x1024/768x512/1024x768 -> 3:2`；其他值默认 `2:3`。
+- 除上述外的其他参数将自动丢弃并忽略。
 
 <br>
 
 </details>
+
+<br>
+
+### `GET /v1/images/method`
+
+> 返回当前生图后端方式（`/chat` 与 `/admin/chat` 用于判断是否启用“新生图瀑布流 + 宽高比 + 并发”）
+
+```bash
+curl http://localhost:8000/v1/images/method \
+  -H "Authorization: Bearer $GROK2API_API_KEY"
+```
+
+返回示例：
+```json
+{ "image_generation_method": "legacy" }
+```
+
+- 可选值：`legacy`、`imagine_ws_experimental`
+- Cloudflare / Docker / 本地 三种部署均保持同一接口语义
 
 <br>
 
@@ -262,7 +287,7 @@ curl http://localhost:8000/v1/images/generations \
 ```bash
 curl http://localhost:8000/v1/images/edits \
   -H "Authorization: Bearer $GROK2API_API_KEY" \
-  -F "model=grok-imagine-1.0" \
+  -F "model=grok-imagine-1.0-edit" \
   -F "prompt=给这只猫加一副太阳镜" \
   -F "image=@./cat.png" \
   -F "n=1" \
@@ -276,7 +301,7 @@ curl http://localhost:8000/v1/images/edits \
 
 | 字段 | 类型 | 说明 | 可用参数 |
 | :--- | :--- | :--- | :--- |
-| `model` | string | 图像模型名 | `grok-imagine-1.0` |
+| `model` | string | 图像模型名 | `grok-imagine-1.0-edit` |
 | `prompt` | string | 编辑提示词 | - |
 | `image` | file[] | 待编辑图片（最多 16 张） | `png`, `jpg`, `jpeg`, `webp` |
 | `n` | integer | 生成数量 | `1` - `10`（流式仅 `1` 或 `2`） |
@@ -339,6 +364,7 @@ curl http://localhost:8000/v1/images/edits \
 |                       | `cf_clearance`             | CF Clearance | Cloudflare 验证 Cookie，用于验证 Cloudflare 的验证。 | `""`                                                    |
 |                       | `max_retry`                | 最大重试     | 请求 Grok 服务失败时的最大重试次数。                 | `3`                                                     |
 |                       | `retry_status_codes`       | 重试状态码   | 触发重试的 HTTP 状态码列表。                         | `[401, 429, 403]`                                       |
+|                       | `image_generation_method`  | 生图调用方式 | 生图调用方式（`legacy` 旧方法；`imagine_ws_experimental` 新方法，实验性）。 | `legacy`                                                |
 | **token**       | `auto_refresh`             | 自动刷新     | 是否开启 Token 自动刷新机制。                        | `true`                                                  |
 |                       | `refresh_interval_hours`   | 刷新间隔     | Token 刷新的时间间隔（小时）。                       | `8`                                                     |
 |                       | `fail_threshold`           | 失败阈值     | 单个 Token 连续失败多少次后被标记为不可用。          | `5`                                                     |

@@ -5,6 +5,8 @@ let models = [];
 let chatMessages = [];
 let chatAttachments = []; // { file, previewUrl }
 let videoAttachments = [];
+let imageGenerationMethod = 'legacy';
+let imageGenerationExperimental = false;
 
 function q(id) {
   return document.getElementById(id);
@@ -41,6 +43,47 @@ function toAbsoluteUrl(url) {
   } catch (e) {
     return u;
   }
+}
+
+function detectBase64ImageMime(base64Text) {
+  const s = String(base64Text || '').trim().replace(/\s+/g, '');
+  if (!s) return 'image/png';
+  if (s.startsWith('/9j/')) return 'image/jpeg';
+  if (s.startsWith('iVBORw0KGgo')) return 'image/png';
+  if (s.startsWith('UklGR')) return 'image/webp';
+  if (s.startsWith('R0lGOD')) return 'image/gif';
+  if (s.startsWith('Qk')) return 'image/bmp';
+  return 'image/png';
+}
+
+function toImageDataUrl(raw) {
+  const value = String(raw || '').trim();
+  if (!value) return '';
+  const lowered = value.toLowerCase();
+  if (['error', 'null', 'none', 'undefined'].includes(lowered)) return '';
+  if (value.startsWith('data:image/')) return value;
+  const mime = detectBase64ImageMime(value);
+  return `data:${mime};base64,${value}`;
+}
+
+function pickImageSrc(item) {
+  const rawUrl = String(item?.url || '').trim();
+  const rawUrlLower = rawUrl.toLowerCase();
+  if (
+    rawUrl &&
+    rawUrl !== 'https://assets.grok.com/' &&
+    rawUrl !== 'https://assets.grok.com' &&
+    rawUrlLower !== 'error' &&
+    rawUrlLower !== 'null' &&
+    rawUrlLower !== 'undefined'
+  ) {
+    return toAbsoluteUrl(rawUrl);
+  }
+  const b64json = String(item?.b64_json || '').trim();
+  if (b64json) return toImageDataUrl(b64json);
+  const base64 = String(item?.base64 || '').trim();
+  if (base64) return toImageDataUrl(base64);
+  return '';
 }
 
 function showUserMsg(role, content) {
@@ -164,6 +207,7 @@ async function init() {
 
   bindFileInputs();
   await refreshModels();
+  await refreshImageGenerationMethod();
 
   chatMessages = [];
   q('chat-messages').innerHTML = '';
@@ -220,6 +264,56 @@ function renderAttachments(kind) {
   });
 }
 
+function updateImageModeUI() {
+  const hint = q('image-mode-hint');
+  const aspectWrap = q('image-aspect-wrap');
+  const concurrencyWrap = q('image-concurrency-wrap');
+  const resultBox = q('image-results');
+  const isExperimental = imageGenerationExperimental;
+
+  if (hint) hint.classList.toggle('hidden', !isExperimental);
+  if (aspectWrap) aspectWrap.classList.toggle('hidden', !isExperimental);
+  if (concurrencyWrap) concurrencyWrap.classList.toggle('hidden', !isExperimental);
+  if (resultBox) resultBox.classList.toggle('waterfall-layout', isExperimental);
+}
+
+function isExperimentalImageMethod(method) {
+  const value = String(method || '').trim().toLowerCase();
+  return (
+    value === 'imagine_ws_experimental' ||
+    value === 'imagine_ws' ||
+    value === 'experimental' ||
+    value === 'new' ||
+    value === 'new_method'
+  );
+}
+
+async function refreshImageGenerationMethod() {
+  const headers = buildApiHeaders();
+  imageGenerationMethod = 'legacy';
+  imageGenerationExperimental = false;
+
+  if (!headers.Authorization) {
+    updateImageModeUI();
+    return;
+  }
+
+  try {
+    const res = await fetch(`/v1/images/method?t=${Date.now()}`, {
+      headers,
+      cache: 'no-store',
+    });
+    if (res.ok) {
+      const data = await res.json().catch(() => ({}));
+      const method = String(data?.image_generation_method || data?.method || '').trim().toLowerCase();
+      imageGenerationMethod = method || 'legacy';
+      imageGenerationExperimental = isExperimentalImageMethod(imageGenerationMethod);
+    }
+  } catch (e) {}
+
+  updateImageModeUI();
+}
+
 async function refreshModels() {
   const sel = q('model-select');
   sel.innerHTML = '';
@@ -242,8 +336,8 @@ async function refreshModels() {
 
     const filtered = models.filter((m) => {
       const id = String(m.id || '');
-      if (currentTab === 'image') return /imagine/i.test(id) && !/video/i.test(id);
-      if (currentTab === 'video') return /video/i.test(id);
+      if (currentTab === 'image') return id === 'grok-imagine-1.0';
+      if (currentTab === 'video') return id === 'grok-imagine-1.0-video';
       return !/imagine/i.test(id) || id === 'grok-4-heavy';
     });
 
@@ -270,11 +364,15 @@ function saveApiKey() {
   localStorage.setItem(STORAGE_KEY, k);
   showToast('已保存', 'success');
   refreshModels();
+  refreshImageGenerationMethod();
 }
 
 function clearApiKey() {
   localStorage.removeItem(STORAGE_KEY);
   q('api-key-input').value = '';
+  imageGenerationMethod = 'legacy';
+  imageGenerationExperimental = false;
+  updateImageModeUI();
   showToast('已清除', 'success');
 }
 
@@ -285,6 +383,7 @@ function switchTab(tab) {
     q(`panel-${t}`).classList.toggle('hidden', t !== tab);
   });
   refreshModels();
+  if (tab === 'image') refreshImageGenerationMethod();
 }
 
 function pickChatImage() {
@@ -403,22 +502,174 @@ async function streamChat(body, bubbleEl) {
   chatMessages.push({ role: 'assistant', content: acc });
 }
 
+function createImageCard(index) {
+  const card = document.createElement('div');
+  card.className = 'result-card';
+  card.dataset.index = String(index);
+  card.innerHTML = `
+    <div class="result-placeholder">等待生成...</div>
+    <div class="result-progress"><div class="result-progress-bar"></div></div>
+    <div class="result-meta"><span>#${index + 1}</span><span class="result-status">0%</span></div>
+  `;
+  return card;
+}
+
+function ensureImageCard(cardMap, index) {
+  const key = Number(index) || 0;
+  if (cardMap.has(key)) return cardMap.get(key);
+  const card = createImageCard(key);
+  q('image-results').appendChild(card);
+  cardMap.set(key, card);
+  return card;
+}
+
+function updateImageCardProgress(card, progress) {
+  const pct = Math.max(0, Math.min(100, Number(progress) || 0));
+  const bar = card.querySelector('.result-progress-bar');
+  const status = card.querySelector('.result-status');
+  if (bar) bar.style.width = `${pct}%`;
+  if (status) status.textContent = `${pct}%`;
+}
+
+function updateImageCardCompleted(card, src, failed) {
+  const placeholder = card.querySelector('.result-placeholder');
+  const progress = card.querySelector('.result-progress');
+  const status = card.querySelector('.result-status');
+
+  if (progress) progress.remove();
+
+  if (failed) {
+    card.classList.add('is-error');
+    if (placeholder) placeholder.textContent = '生成失败';
+    if (status) status.textContent = '失败';
+    return;
+  }
+
+  card.classList.remove('is-error');
+  if (placeholder) placeholder.remove();
+
+  const img = document.createElement('img');
+  img.alt = 'image';
+  img.src = src;
+  card.insertBefore(img, card.firstChild);
+
+  if (status) status.textContent = '完成';
+}
+
+function buildImageRequestConfig() {
+  const ratio = String(q('image-aspect')?.value || '2:3');
+  const concurrency = Math.max(1, Math.min(3, Math.floor(Number(q('image-concurrency')?.value || 1) || 1)));
+  if (!imageGenerationExperimental) {
+    return { size: '1024x1024', concurrency: 1 };
+  }
+  return { size: ratio, concurrency };
+}
+
+async function streamImage(body, headers) {
+  const res = await fetch('/v1/images/generations', {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({ ...body, stream: true }),
+  });
+
+  if (!res.ok || !res.body) {
+    const t = await res.text().catch(() => '');
+    throw new Error(`HTTP ${res.status}: ${t.slice(0, 200)}`);
+  }
+
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  const cardMap = new Map();
+  const completedSet = new Set();
+  let rendered = 0;
+  let buf = '';
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+
+    buf += decoder.decode(value, { stream: true });
+    const blocks = buf.split('\n\n');
+    buf = blocks.pop() || '';
+
+    for (const block of blocks) {
+      const lines = block.split('\n').map((line) => line.trim()).filter(Boolean);
+      if (!lines.length) continue;
+
+      let event = '';
+      const dataLines = [];
+      lines.forEach((line) => {
+        if (line.startsWith('event:')) event = line.slice(6).trim();
+        if (line.startsWith('data:')) dataLines.push(line.slice(5).trim());
+      });
+
+      const payload = dataLines.join('\n').trim();
+      if (!payload) continue;
+      if (payload === '[DONE]') return rendered;
+
+      let obj = null;
+      try {
+        obj = JSON.parse(payload);
+      } catch (e) {
+        continue;
+      }
+
+      const type = String(obj?.type || event || '').trim();
+      const idx = Math.max(0, Number(obj?.index) || 0);
+      const card = ensureImageCard(cardMap, idx);
+
+      if (type === 'image_generation.partial_image') {
+        updateImageCardProgress(card, obj?.progress ?? 0);
+        continue;
+      }
+
+      if (type === 'image_generation.completed') {
+        const src = pickImageSrc(obj);
+        const failed = !src;
+        updateImageCardCompleted(card, src, failed);
+        if (!failed && !completedSet.has(idx)) {
+          completedSet.add(idx);
+          rendered += 1;
+        }
+      }
+    }
+  }
+
+  return rendered;
+}
+
 async function generateImage() {
   const prompt = String(q('image-prompt').value || '').trim();
   if (!prompt) return showToast('请输入 prompt', 'warning');
+
   const model = String(q('model-select').value || 'grok-imagine-1.0').trim();
   const n = Math.max(1, Math.min(10, Math.floor(Number(q('image-n').value || 1) || 1)));
+  const stream = Boolean(q('stream-toggle').checked);
+  const useStream = stream && n <= 2;
+  const { size, concurrency } = buildImageRequestConfig();
 
   const headers = { ...buildApiHeaders(), 'Content-Type': 'application/json' };
   if (!headers.Authorization) return showToast('请先填写 API Key', 'warning');
 
   q('image-results').innerHTML = '';
   showToast('生成中...', 'info');
+
+  const reqBody = { prompt, model, n, size, concurrency };
   try {
+    if (stream && !useStream) {
+      showToast('n > 2 automatically disables Stream and falls back to non-stream mode.', 'warning');
+    }
+
+    if (useStream) {
+      const rendered = await streamImage(reqBody, headers);
+      if (!rendered) throw new Error('没有生成结果');
+      return;
+    }
+
     const res = await fetch('/v1/images/generations', {
       method: 'POST',
       headers,
-      body: JSON.stringify({ prompt, model, n, response_format: 'url' }),
+      body: JSON.stringify({ ...reqBody, stream: false }),
     });
     const data = await res.json().catch(() => ({}));
     if (!res.ok) throw new Error(data?.error?.message || data?.detail || `HTTP ${res.status}`);
@@ -426,14 +677,20 @@ async function generateImage() {
     const items = Array.isArray(data?.data) ? data.data : [];
     if (!items.length) throw new Error('没有生成结果');
 
-    items.forEach((it) => {
-      const url = it.url ? String(it.url) : it.b64_json ? `data:image/png;base64,${String(it.b64_json)}` : '';
-      if (!url) return;
-      const card = document.createElement('div');
-      card.className = 'result-card';
-      card.innerHTML = `<img src="${escapeHtml(url)}" alt="image" />`;
+    let rendered = 0;
+    items.forEach((it, idx) => {
+      const src = pickImageSrc(it);
+      const card = createImageCard(idx);
       q('image-results').appendChild(card);
+      if (!src) {
+        updateImageCardCompleted(card, '', true);
+        return;
+      }
+      rendered += 1;
+      updateImageCardCompleted(card, src, false);
     });
+
+    if (!rendered) throw new Error('图片返回为空或格式不支持');
   } catch (e) {
     showToast('生图失败: ' + (e?.message || e), 'error');
   }
