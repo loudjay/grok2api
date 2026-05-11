@@ -17,6 +17,13 @@ function bearerToken(authHeader: string | null): string | null {
   return m?.[1]?.trim() || null;
 }
 
+function extractApiToken(req: { header(name: string): string | undefined | null }): string | null {
+  const bearer = bearerToken(req.header("Authorization") ?? null);
+  if (bearer) return bearer;
+  const xApiKey = String(req.header("X-API-Key") ?? req.header("x-api-key") ?? "").trim();
+  return xApiKey || null;
+}
+
 function authError(message: string, code: string): Record<string, unknown> {
   return {
     error: {
@@ -31,7 +38,7 @@ export const requireApiAuth: MiddlewareHandler<{ Bindings: Env; Variables: { api
   c,
   next,
 ) => {
-  const token = bearerToken(c.req.header("Authorization") ?? null);
+  const token = extractApiToken(c.req);
   const settings = await getSettings(c.env);
 
   if (!token) {
@@ -65,7 +72,7 @@ export const requireApiAuth: MiddlewareHandler<{ Bindings: Env; Variables: { api
 };
 
 export const requireAdminAuth: MiddlewareHandler<{ Bindings: Env }> = async (c, next) => {
-  const token = bearerToken(c.req.header("Authorization") ?? null);
+  const token = extractApiToken(c.req);
   if (!token) return c.json({ error: "缺少会话", code: "MISSING_SESSION" }, 401);
   const ok = await verifyAdminSession(c.env.DB, token);
   if (!ok) return c.json({ error: "会话已过期", code: "SESSION_EXPIRED" }, 401);

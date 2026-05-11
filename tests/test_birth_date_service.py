@@ -1,7 +1,7 @@
 import datetime
 import re
 
-from app.services.register.services import birth_date_service as birth_service_module
+from app.services.account import birth_date_service as birth_service_module
 
 
 class _DummyResponse:

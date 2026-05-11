@@ -83,10 +83,10 @@ URL: `http://<host>:8000/login`
 Default username/password: `admin` / `admin` (config keys `app.admin_username` / `app.app_key`, change it in production).
 
 Pages:
-- `http://<host>:8000/admin/token`: Token management (import/export/batch ops/auto register)
+- `http://<host>:8000/admin/token`: Token management (import/export/batch ops/account-settings refresh)
 - `http://<host>:8000/admin/keys`: API key management (stats/filter/create/edit/delete)
 - `http://<host>:8000/admin/datacenter`: Data center (metrics + log viewer)
-- `http://<host>:8000/admin/config`: Configuration (including auto register settings)
+- `http://<host>:8000/admin/config`: Configuration
 - `http://<host>:8000/admin/cache`: Cache management (local cache + online assets)
 
 ### Mobile Responsiveness (Site-wide)
@@ -125,18 +125,11 @@ Pages:
 - Better error surface: frontend now prioritizes backend `detail/error/message`.
 - Updating a non-existent key returns `404` on both FastAPI and Workers.
 
-### Auto Register (Token -> Add -> Auto Register)
+### Account Settings Refresh
 
-Auto register will:
-- Start a local Turnstile Solver first (default 5 threads), then run registration
-- Stop the solver automatically when the job finishes
-- After a successful sign-up, it will automatically: accept TOS + set BirthDate + enable NSFW
-  - If any TOS/BirthDate/NSFW step fails, the registration attempt is marked as failed and the UI will show the reason
-
-Required config keys (Admin -> Config, `register.*`):
-- `register.worker_domain` / `register.email_domain` / `register.admin_password`: temp-mail Worker settings
-- `register.solver_url` / `register.solver_browser_type` / `register.solver_threads`: local solver settings
-- Optional: `register.yescaptcha_key` (when set, YesCaptcha is preferred and local solver is not required)
+- Newly added/imported tokens can automatically run: accept TOS + set BirthDate + enable NSFW.
+- The Token page also exposes a one-click NSFW refresh for existing tokens.
+- The refresh flow is available on local FastAPI and Docker. Cloudflare Workers keeps token management and API compatibility, but does not expose the local-only refresh button.
 
 ### Environment variables
 
@@ -370,20 +363,6 @@ When upgrading from older versions, the service will keep existing local data an
 | | `usage_max_concurrent` | Usage concurrency | Concurrency cap for usage queries. Recommended 25. | `25` |
 | | `assets_delete_batch_size` | Asset cleanup batch | Batch concurrency for online asset deletion. Recommended 10. | `10` |
 | | `admin_assets_batch_size` | Admin cleanup batch | Batch concurrency for admin asset stats/cleanup. Recommended 10. | `10` |
-| **register** | `worker_domain` | Worker domain | Temp-mail Worker domain (without `https://`). | `""` |
-| | `email_domain` | Email domain | Temp-mail domain, e.g. `example.com`. | `""` |
-| | `admin_password` | Worker admin password | Admin password/key for the temp-mail Worker panel. | `""` |
-| | `yescaptcha_key` | YesCaptcha key | Optional. Prefer YesCaptcha when set. | `""` |
-| | `solver_url` | Solver URL | Local Turnstile solver URL. | `http://127.0.0.1:5072` |
-| | `solver_browser_type` | Solver browser | `chromium` / `chrome` / `msedge` / `camoufox`. | `camoufox` |
-| | `solver_threads` | Solver threads | Threads when auto-starting solver. | `5` |
-| | `register_threads` | Register concurrency | Registration concurrency. | `10` |
-| | `default_count` | Default count | Default register count if not specified in UI. | `100` |
-| | `auto_start_solver` | Auto start solver | Auto-start local solver when using localhost endpoint. | `true` |
-| | `solver_debug` | Solver debug | Enable solver debug logging. | `false` |
-| | `max_errors` | Max errors | Stop the job after this many failures (0 = auto). | `0` |
-| | `max_runtime_minutes` | Max runtime | Stop the job after N minutes (0 = unlimited). | `0` |
-
 <br>
 
 ## Fixes In This Release

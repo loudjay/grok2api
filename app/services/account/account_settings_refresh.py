@@ -1,15 +1,13 @@
 from __future__ import annotations
 
 import asyncio
-from typing import Iterable, Any
+from typing import Any, Iterable
 
 from app.core.config import get_config
 from app.core.logger import logger
-from app.services.register.services import (
-    UserAgreementService,
-    BirthDateService,
-    NsfwSettingsService,
-)
+from app.services.account.birth_date_service import BirthDateService
+from app.services.account.nsfw_service import NsfwSettingsService
+from app.services.account.user_agreement_service import UserAgreementService
 from app.services.token.manager import TokenManager, get_token_manager
 
 
@@ -34,15 +32,12 @@ def parse_sso_pair(raw_token: str) -> tuple[str, str]:
     raw = str(raw_token or "").strip()
     if not raw:
         return "", ""
-
     if ";" in raw:
         sso = _extract_cookie_value(raw, "sso") or ""
         sso_rw = _extract_cookie_value(raw, "sso-rw") or sso
         return sso.strip(), sso_rw.strip()
-
     sso = raw[4:].strip() if raw.startswith("sso=") else raw
-    sso_rw = sso
-    return sso, sso_rw
+    return sso, sso
 
 
 def normalize_sso_token(raw_token: str) -> str:
@@ -52,40 +47,33 @@ def normalize_sso_token(raw_token: str) -> str:
 
 def _coerce_concurrency(value: Any, default: int = DEFAULT_NSFW_REFRESH_CONCURRENCY) -> int:
     try:
-        n = int(value)
+        return max(1, int(value))
     except Exception:
-        n = default
-    return max(1, n)
+        return default
 
 
 def _coerce_retries(value: Any, default: int = DEFAULT_NSFW_REFRESH_RETRIES) -> int:
     try:
-        n = int(value)
+        return max(0, int(value))
     except Exception:
-        n = default
-    return max(0, n)
+        return default
 
 
 def _format_step_error(result: dict, fallback: str = "unknown error") -> str:
     if not isinstance(result, dict):
         return fallback
-
     text = str(result.get("error") or "").strip()
     if text:
         return text
-
     status_code = result.get("status_code")
     if status_code is not None:
         return f"HTTP {status_code}"
-
     grpc_status = result.get("grpc_status")
     if grpc_status is not None:
         return f"gRPC {grpc_status}"
-
     response_text = str(result.get("response_text") or "").strip()
     if response_text:
         return response_text
-
     return fallback
 
 
@@ -105,30 +93,17 @@ class AccountSettingsRefreshService:
         birth_service = BirthDateService(cf_clearance=self.cf_clearance)
         nsfw_service = NsfwSettingsService(cf_clearance=self.cf_clearance)
 
-        tos_result = user_service.accept_tos_version(
-            sso=sso,
-            sso_rw=sso_rw,
-            impersonate=DEFAULT_IMPERSONATE,
-        )
+        tos_result = user_service.accept_tos_version(sso=sso, sso_rw=sso_rw, impersonate=DEFAULT_IMPERSONATE)
         if not tos_result.get("ok"):
             return False, "tos", _format_step_error(tos_result, "accept_tos failed")
 
-        birth_result = birth_service.set_birth_date(
-            sso=sso,
-            sso_rw=sso_rw,
-            impersonate=DEFAULT_IMPERSONATE,
-        )
+        birth_result = birth_service.set_birth_date(sso=sso, sso_rw=sso_rw, impersonate=DEFAULT_IMPERSONATE)
         if not birth_result.get("ok"):
             return False, "birth", _format_step_error(birth_result, "set_birth_date failed")
 
-        nsfw_result = nsfw_service.enable_nsfw(
-            sso=sso,
-            sso_rw=sso_rw,
-            impersonate=DEFAULT_IMPERSONATE,
-        )
+        nsfw_result = nsfw_service.enable_nsfw(sso=sso, sso_rw=sso_rw, impersonate=DEFAULT_IMPERSONATE)
         if not nsfw_result.get("ok"):
             return False, "nsfw", _format_step_error(nsfw_result, "enable_nsfw failed")
-
         return True, "", ""
 
     async def refresh_tokens(
@@ -139,7 +114,6 @@ class AccountSettingsRefreshService:
     ) -> dict[str, Any]:
         resolved_concurrency = _coerce_concurrency(concurrency)
         resolved_retries = _coerce_retries(retries)
-
         unique_tokens: list[str] = []
         seen: set[str] = set()
         for token in tokens:
@@ -148,12 +122,8 @@ class AccountSettingsRefreshService:
                 continue
             seen.add(normalized)
             unique_tokens.append(normalized)
-
         if not unique_tokens:
-            return {
-                "summary": {"total": 0, "success": 0, "failed": 0, "invalidated": 0},
-                "failed": [],
-            }
+            return {"summary": {"total": 0, "success": 0, "failed": 0, "invalidated": 0}, "failed": []}
 
         semaphore = asyncio.Semaphore(resolved_concurrency)
 
@@ -161,42 +131,21 @@ class AccountSettingsRefreshService:
             max_attempts = resolved_retries + 1
             last_step = "unknown"
             last_error = "unknown error"
-
             async with semaphore:
                 for attempt in range(1, max_attempts + 1):
                     try:
                         ok, step, error = await asyncio.to_thread(self._apply_once, token)
                     except Exception as exc:
                         ok, step, error = False, "exception", str(exc)
-
                     if ok:
-                        updated = await self.token_manager.mark_token_account_settings_success(
-                            token,
-                            save=False,
-                        )
+                        updated = await self.token_manager.mark_token_account_settings_success(token, save=False)
                         if not updated:
-                            logger.warning(
-                                "Account settings refresh succeeded but token not found: {}...",
-                                token[:10],
-                            )
-                        return {
-                            "token": token,
-                            "ok": True,
-                            "attempts": attempt,
-                        }
-
+                            logger.warning("Account settings refresh succeeded but token not found: {}...", token[:10])
+                        return {"token": token, "ok": True, "attempts": attempt}
                     last_step = step or "unknown"
                     last_error = error or "unknown error"
-
-                reason = (
-                    f"account_settings_refresh_failed step={last_step} "
-                    f"attempts={max_attempts} error={last_error}"
-                )
-                invalidated = await self.token_manager.set_token_invalid(
-                    token,
-                    reason=reason,
-                    save=False,
-                )
+                reason = f"account_settings_refresh_failed step={last_step} attempts={max_attempts} error={last_error}"
+                invalidated = await self.token_manager.set_token_invalid(token, reason=reason, save=False)
                 return {
                     "token": token,
                     "ok": False,
@@ -207,24 +156,21 @@ class AccountSettingsRefreshService:
                 }
 
         results = await asyncio.gather(*[_run_one(token) for token in unique_tokens])
-
         try:
             await self.token_manager.commit()
         except Exception as exc:
             logger.warning("Account settings refresh commit failed: {}", exc)
 
-        success = sum(1 for item in results if item.get("ok"))
         failed_items = [item for item in results if not item.get("ok")]
-        invalidated = sum(1 for item in failed_items if item.get("invalidated"))
-
-        summary = {
-            "total": len(unique_tokens),
-            "success": success,
-            "failed": len(failed_items),
-            "invalidated": invalidated,
+        return {
+            "summary": {
+                "total": len(unique_tokens),
+                "success": sum(1 for item in results if item.get("ok")),
+                "failed": len(failed_items),
+                "invalidated": sum(1 for item in failed_items if item.get("invalidated")),
+            },
+            "failed": failed_items,
         }
-
-        return {"summary": summary, "failed": failed_items}
 
 
 async def refresh_account_settings_for_tokens(
@@ -233,35 +179,24 @@ async def refresh_account_settings_for_tokens(
     retries: int | None = None,
 ) -> dict[str, Any]:
     resolved_concurrency = _coerce_concurrency(
-        concurrency if concurrency is not None else get_config(
-            "token.nsfw_refresh_concurrency",
-            DEFAULT_NSFW_REFRESH_CONCURRENCY,
-        ),
+        concurrency if concurrency is not None else get_config("token.nsfw_refresh_concurrency", DEFAULT_NSFW_REFRESH_CONCURRENCY),
         default=DEFAULT_NSFW_REFRESH_CONCURRENCY,
     )
     resolved_retries = _coerce_retries(
-        retries if retries is not None else get_config(
-            "token.nsfw_refresh_retries",
-            DEFAULT_NSFW_REFRESH_RETRIES,
-        ),
+        retries if retries is not None else get_config("token.nsfw_refresh_retries", DEFAULT_NSFW_REFRESH_RETRIES),
         default=DEFAULT_NSFW_REFRESH_RETRIES,
     )
-
     token_manager = await get_token_manager()
     cf_clearance = str(get_config("grok.cf_clearance", "") or "").strip()
     service = AccountSettingsRefreshService(token_manager, cf_clearance=cf_clearance)
-    return await service.refresh_tokens(
-        tokens=tokens,
-        concurrency=resolved_concurrency,
-        retries=resolved_retries,
-    )
+    return await service.refresh_tokens(tokens=tokens, concurrency=resolved_concurrency, retries=resolved_retries)
 
 
 __all__ = [
     "AccountSettingsRefreshService",
-    "parse_sso_pair",
-    "normalize_sso_token",
-    "refresh_account_settings_for_tokens",
     "DEFAULT_NSFW_REFRESH_CONCURRENCY",
     "DEFAULT_NSFW_REFRESH_RETRIES",
+    "normalize_sso_token",
+    "parse_sso_pair",
+    "refresh_account_settings_for_tokens",
 ]

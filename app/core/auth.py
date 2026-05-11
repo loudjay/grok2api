@@ -9,10 +9,11 @@ import json
 from pathlib import Path
 from typing import Optional, Set
 
-from fastapi import HTTPException, Security, status
+from fastapi import Header, HTTPException, Security, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from app.core.config import get_config
+from app.services.api_keys import api_key_manager
 
 # 定义 Bearer Scheme
 security = HTTPBearer(
@@ -89,6 +90,7 @@ async def _load_legacy_api_keys() -> Set[str]:
 
 async def verify_api_key(
     auth: Optional[HTTPAuthorizationCredentials] = Security(security),
+    x_api_key: str | None = Header(default=None, alias="x-api-key"),
 ) -> Optional[str]:
     """
     验证 Bearer Token
@@ -103,15 +105,22 @@ async def verify_api_key(
     if not api_key and not legacy_keys:
         return None
 
-    if not auth:
+    token = auth.credentials if auth else None
+    if not token and x_api_key:
+        token = str(x_api_key).strip() or None
+
+    if not token:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Missing authentication token",
             headers={"WWW-Authenticate": "Bearer"},
         )
 
-    token = auth.credentials
     if (api_key and token == api_key) or token in legacy_keys:
+        return token
+
+    await api_key_manager.init()
+    if api_key_manager.validate_key(token):
         return token
 
     raise HTTPException(

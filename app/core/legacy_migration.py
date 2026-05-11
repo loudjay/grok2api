@@ -154,7 +154,7 @@ async def migrate_legacy_account_settings(
 
         from app.core.config import get_config
         from app.core.storage import get_storage
-        from app.services.register.services import (
+        from app.services.account import (
             UserAgreementService,
             BirthDateService,
             NsfwSettingsService,

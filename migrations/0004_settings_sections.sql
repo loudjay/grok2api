@@ -17,10 +17,5 @@ VALUES
     'performance',
     '{"assets_max_concurrent":25,"media_max_concurrent":50,"usage_max_concurrent":25,"assets_delete_batch_size":10,"admin_assets_batch_size":10}',
     CAST(strftime('%s','now') AS INTEGER) * 1000
-  ),
-  (
-    'register',
-    '{"worker_domain":"","email_domain":"","admin_password":"","yescaptcha_key":"","solver_url":"http://127.0.0.1:5072","solver_browser_type":"camoufox","solver_threads":5,"register_threads":10,"default_count":100,"auto_start_solver":true,"solver_debug":false,"max_errors":0,"max_runtime_minutes":0}',
-    CAST(strftime('%s','now') AS INTEGER) * 1000
   );
 

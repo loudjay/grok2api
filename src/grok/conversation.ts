@@ -1,10 +1,13 @@
 import type { GrokSettings } from "../settings";
 import { getDynamicHeaders } from "./headers";
 import { getModelInfo, toGrokModel } from "./models";
+import { toolCallsToXml } from "./tooling";
 
 export interface OpenAIChatMessage {
   role: string;
   content: string | Array<{ type: string; text?: string; image_url?: { url?: string } }>;
+  tool_calls?: Array<Record<string, unknown>>;
+  tool_call_id?: string;
 }
 
 export interface OpenAIChatRequestBody {
@@ -27,6 +30,21 @@ export function extractContent(messages: OpenAIChatMessage[]): { content: string
 
   for (const msg of messages) {
     const role = msg.role ?? "user";
+    if (role === "tool") {
+      const toolResult = String(msg.content ?? "").trim();
+      const toolCallId = String(msg.tool_call_id ?? "").trim();
+      if (toolResult) {
+        const label = toolCallId ? `[tool result for ${toolCallId}]` : "[tool result]";
+        extracted.push({ role, text: `${label}:\n${toolResult}` });
+      }
+      continue;
+    }
+    if (role === "assistant" && Array.isArray(msg.tool_calls) && msg.tool_calls.length) {
+      const xml = toolCallsToXml(msg.tool_calls);
+      const text = typeof msg.content === "string" ? String(msg.content).trim() : "";
+      extracted.push({ role, text: text ? `${text}\n${xml}` : xml });
+      continue;
+    }
     const content = msg.content ?? "";
 
     const parts: string[] = [];

@@ -6,6 +6,7 @@ from typing import Any, Dict, Optional
 
 from curl_cffi import requests
 
+
 DEFAULT_USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
     "AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -14,7 +15,6 @@ DEFAULT_USER_AGENT = (
 
 
 def generate_random_birthdate() -> str:
-    """Generate a random birth date between 20 and 40 years old."""
     today = datetime.date.today()
     age = random.randint(20, 40)
     birth_year = today.year - age
@@ -24,8 +24,6 @@ def generate_random_birthdate() -> str:
 
 
 class BirthDateService:
-    """Set account birth date via Grok REST API."""
-
     def __init__(self, cf_clearance: str = ""):
         self.cf_clearance = (cf_clearance or "").strip()
 
@@ -39,43 +37,26 @@ class BirthDateService:
         timeout: int = 15,
     ) -> Dict[str, Any]:
         if not sso:
-            return {
-                "ok": False,
-                "status_code": None,
-                "response_text": "",
-                "error": "missing sso",
-            }
+            return {"ok": False, "status_code": None, "response_text": "", "error": "missing sso"}
         if not sso_rw:
-            return {
-                "ok": False,
-                "status_code": None,
-                "response_text": "",
-                "error": "missing sso-rw",
-            }
+            return {"ok": False, "status_code": None, "response_text": "", "error": "missing sso-rw"}
 
-        url = "https://grok.com/rest/auth/set-birth-date"
-        cookies = {
-            "sso": sso,
-            "sso-rw": sso_rw,
-        }
+        cookies = {"sso": sso, "sso-rw": sso_rw}
         clearance = (cf_clearance if cf_clearance is not None else self.cf_clearance).strip()
         if clearance:
             cookies["cf_clearance"] = clearance
 
-        headers = {
-            "content-type": "application/json",
-            "origin": "https://grok.com",
-            "referer": "https://grok.com/",
-            "user-agent": user_agent or DEFAULT_USER_AGENT,
-        }
-        payload = {"birthDate": generate_random_birthdate()}
-
         try:
             response = requests.post(
-                url,
-                headers=headers,
+                "https://grok.com/rest/auth/set-birth-date",
+                headers={
+                    "content-type": "application/json",
+                    "origin": "https://grok.com",
+                    "referer": "https://grok.com/",
+                    "user-agent": user_agent or DEFAULT_USER_AGENT,
+                },
                 cookies=cookies,
-                json=payload,
+                json={"birthDate": generate_random_birthdate()},
                 impersonate=impersonate or "chrome120",
                 timeout=timeout,
             )
@@ -88,10 +69,5 @@ class BirthDateService:
                 "response_text": response_text,
                 "error": None if ok else f"HTTP {status_code}",
             }
-        except Exception as e:
-            return {
-                "ok": False,
-                "status_code": None,
-                "response_text": "",
-                "error": str(e),
-            }
+        except Exception as exc:
+            return {"ok": False, "status_code": None, "response_text": "", "error": str(exc)}

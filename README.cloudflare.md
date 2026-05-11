@@ -4,6 +4,7 @@
 
 > 一键部署前置条件：若使用 GitHub Actions 工作流，请先在仓库 Secrets 配置 `CLOUDFLARE_API_TOKEN` 与 `CLOUDFLARE_ACCOUNT_ID`。  
 > Docker 一键启动入口仍是 `docker compose up -d`，请参考 `readme.md`。
+> 本仓库也提供本地一键脚本：Windows 用 `pwsh ./scripts/deploy-cloudflare.ps1`，WSL/Linux 用 `bash ./scripts/deploy-cloudflare.sh`。
 
 ## 功能概览
 
@@ -71,6 +72,8 @@ npx wrangler d1 migrations apply grok2api --remote
 npx wrangler d1 migrations apply DB --remote
 ```
 
+如果你使用当前仓库锁定的 `wrangler@4.61.0` 做本地预览迁移，不要再加 `--yes`。本仓库的一键脚本会通过 `CI=1` 跳过确认。
+
 迁移文件在：
 - `migrations/0001_init.sql`
 - `migrations/0002_r2_cache.sql`（旧版，已废弃）
@@ -117,6 +120,16 @@ npx wrangler kv namespace create grok2api-cache
 
 ```bash
 npx wrangler deploy
+```
+
+或直接使用一键脚本：
+
+```bash
+bash ./scripts/deploy-cloudflare.sh
+```
+
+```powershell
+pwsh ./scripts/deploy-cloudflare.ps1
 ```
 
 部署后检查：

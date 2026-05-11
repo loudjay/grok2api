@@ -1,6 +1,6 @@
 import asyncio
 
-from app.services.register import account_settings_refresh as refresh_module
+from app.services.account import account_settings_refresh as refresh_module
 
 
 class _DummyTokenManager:

@@ -3,7 +3,7 @@ import asyncio
 from app.core import legacy_migration
 import app.core.config as config_module
 import app.core.storage as storage_module
-import app.services.register.services as services_module
+import app.services.account as services_module
 
 
 class _DummyStorage:

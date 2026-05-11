@@ -54,6 +54,10 @@ docker compose up -d
 # 从当前仓库源码构建并启动（可选）
 docker compose -f docker-compose.yml -f docker-compose.build.yml up -d --build
 
+# 一键部署当前源码（Windows / WSL 二选一）
+pwsh ./scripts/deploy-docker.ps1
+bash ./scripts/deploy-docker.sh
+
 # （可选）启动后自检
 python scripts/smoke_test.py --base-url http://127.0.0.1:8000
 ```
@@ -77,7 +81,8 @@ docker compose -f docker-compose.yml -f docker-compose.build.yml config
 
 > 部署一致性说明：本地（FastAPI）/ Docker / Cloudflare Workers 共用同一套管理功能语义（Token 筛选、API Key 管理、后台管理接口语义一致）。
 > 上游关键同步（2026-02-20）：已同步聊天页“重试上一条回答”与“图片加载失败点击重试”，三部署下行为一致。
-> Cloudflare 可通过 `.github/workflows/cloudflare-workers.yml` 一键部署（需先配置上述两个 Secrets），Docker 仍保持 `docker compose up -d` 一键启动。
+> Cloudflare 可通过 `.github/workflows/cloudflare-workers.yml` 一键部署（需先配置上述两个 Secrets），也可在本地直接执行 `pwsh ./scripts/deploy-cloudflare.ps1` 或 `bash ./scripts/deploy-cloudflare.sh`。
+> Docker 可直接执行 `pwsh ./scripts/deploy-docker.ps1` 或 `bash ./scripts/deploy-docker.sh` 一键部署当前源码。
 
 ### 管理面板
 
@@ -86,10 +91,10 @@ docker compose -f docker-compose.yml -f docker-compose.build.yml config
 默认账号密码：`admin` / `admin`（对应配置项 `app.admin_username` / `app.app_key`，建议上线后修改）。
 
 常用页面：
-- `http://<host>:8000/admin/token`：Token 管理（导入/导出/批量操作/自动注册）
+- `http://<host>:8000/admin/token`：Token 管理（导入/导出/批量操作/账户设置刷新）
 - `http://<host>:8000/admin/keys`：API Key 管理（统计/筛选/新增/编辑/删除）
 - `http://<host>:8000/admin/datacenter`：数据中心（常用指标 + 日志查看）
-- `http://<host>:8000/admin/config`：配置管理（含自动注册所需配置）
+- `http://<host>:8000/admin/config`：配置管理
 - `http://<host>:8000/admin/cache`：缓存管理（本地缓存 + 在线资产）
 
 ### 手机端适配（全站）
@@ -128,23 +133,11 @@ docker compose -f docker-compose.yml -f docker-compose.build.yml config
 - 错误提示优化：前端优先展示后端 `detail/error/message`，避免“创建失败/更新失败”无上下文。
 - 更新不存在的 Key 会返回 `404`（FastAPI 与 Workers 一致）。
 
-### 自动注册（Token 管理 -> 添加 -> 自动注册）
+### 账户设置刷新
 
-支持两种方式：
-- 直接添加 Token（手动/批量导入）
-- 自动注册并自动写入 Token 池
-
-自动注册特性：
-- 可设置注册数量（不填默认 `100`）
-- 可设置并发（默认 `10`）
-- 注册前会自动启动本地 Turnstile Solver（默认 5 线程），注册结束后自动关闭
-- 注册成功后会自动执行：同意用户协议（TOS）+ 设置年龄 + 开启 NSFW
-  - 若 TOS / 年龄 / NSFW 任一步骤失败，会判定该次注册失败并在前端显示错误原因
-
-自动注册前置配置（在「配置管理」-> `register.*`）：
-- `register.worker_domain` / `register.email_domain` / `register.admin_password`：临时邮箱 Worker 配置
-- `register.solver_url` / `register.solver_browser_type` / `register.solver_threads`：本地 Turnstile Solver 配置
-- 可选：`register.yescaptcha_key`（配置后优先走 YesCaptcha，无需本地 solver）
+- 新增或导入 Token 后，会自动执行：同意用户协议（TOS）+ 设置年龄 + 开启 NSFW。
+- Token 管理页提供「一键刷新 NSFW」，用于对现有 Token 批量补齐账户设置。
+- 该刷新流程仅在本地 FastAPI / Docker 开放；Cloudflare Workers 保持接口兼容，但不展示本地专用刷新按钮。
 
 升级兼容：
 - 本地部署升级后会自动对「旧 Token」做一次 TOS + 设置年龄 + NSFW（并发 10，best-effort，仅执行一次，避免重复刷）。

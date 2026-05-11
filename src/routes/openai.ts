@@ -8,6 +8,14 @@ import { extractContent, buildConversationPayload, sendConversationRequest } fro
 import { uploadImage } from "../grok/upload";
 import { getDynamicHeaders } from "../grok/headers";
 import { createMediaPost, createPost } from "../grok/create";
+import {
+  buildAnthropicJsonFromChat,
+  buildResponsesJsonFromChat,
+  createAnthropicStreamFromChatStream,
+  createResponsesStreamFromChatStream,
+  parseAnthropicInput,
+  parseResponsesInput,
+} from "../grok/compat";
 import { createOpenAiStreamFromGrokNdjson, parseOpenAiFromGrokNdjson } from "../grok/processor";
 import {
   IMAGE_METHOD_IMAGINE_WS_EXPERIMENTAL,
@@ -16,6 +24,14 @@ import {
   resolveImageGenerationMethod,
   sendExperimentalImageEditRequest,
 } from "../grok/imagineExperimental";
+import {
+  buildToolSystemPrompt,
+  extractToolNames,
+  injectToolPrompt,
+  normalizeAnthropicToolChoice,
+  normalizeAnthropicTools,
+  normalizeResponsesTools,
+} from "../grok/tooling";
 import { addRequestLog } from "../repo/logs";
 import { applyCooldown, recordTokenFailure, selectBestToken } from "../repo/tokens";
 import type { ApiAuthInfo } from "../auth";
@@ -1039,6 +1055,25 @@ function createdTs(): number {
   return Math.floor(Date.now() / 1000);
 }
 
+function isToolCapableModel(model: string): boolean {
+  const cfg = MODEL_CONFIG[model];
+  return Boolean(cfg && !cfg.is_image_model && !cfg.is_video_model);
+}
+
+function applyToolsToPrompt(
+  content: string,
+  tools: Array<Record<string, unknown>> | null | undefined,
+  toolChoice: unknown,
+): { content: string; toolNames: string[] } {
+  if (!tools?.length) return { content, toolNames: [] };
+  const toolNames = extractToolNames(tools);
+  if (!toolNames.length) return { content, toolNames: [] };
+  return {
+    content: injectToolPrompt(content, buildToolSystemPrompt(tools, toolChoice)),
+    toolNames,
+  };
+}
+
 function buildImageJsonPayload(field: ImageResponseFormat, values: string[]) {
   return {
     created: createdTs(),
@@ -1199,6 +1234,8 @@ openAiRoutes.post("/chat/completions", async (c) => {
       model?: string;
       messages?: any[];
       stream?: boolean;
+      tools?: Array<Record<string, unknown>>;
+      tool_choice?: unknown;
       video_config?: {
         aspect_ratio?: string;
         video_length?: number;
@@ -1212,6 +1249,9 @@ openAiRoutes.post("/chat/completions", async (c) => {
     if (!Array.isArray(body.messages)) return c.json(openAiError("Missing 'messages'", "missing_messages"), 400);
     if (!isValidModel(requestedModel))
       return c.json(openAiError(`Model '${requestedModel}' not supported`, "model_not_supported"), 400);
+    if (Array.isArray(body.tools) && body.tools.length && !isToolCapableModel(requestedModel)) {
+      return c.json(openAiError("Tools are only supported on chat models", "tools_not_supported"), 400);
+    }
 
     const settingsBundle = await getSettings(c.env);
     const cfg = MODEL_CONFIG[requestedModel]!;
@@ -1247,7 +1287,8 @@ openAiRoutes.post("/chat/completions", async (c) => {
       const cf = normalizeCfCookie(settingsBundle.grok.cf_clearance ?? "");
       const cookie = cf ? `sso-rw=${jwt};sso=${jwt};${cf}` : `sso-rw=${jwt};sso=${jwt}`;
 
-      const { content, images } = extractContent(body.messages as any);
+      const { content: rawContent, images } = extractContent(body.messages as any);
+      const { content, toolNames } = applyToolsToPrompt(rawContent, body.tools, body.tool_choice);
       const isVideoModel = Boolean(cfg.is_video_model);
       const imgInputs = isVideoModel && images.length > 1 ? images.slice(0, 1) : images;
 
@@ -1304,6 +1345,7 @@ openAiRoutes.post("/chat/completions", async (c) => {
             global: settingsBundle.global,
             origin,
             requestedModel,
+            toolNames,
             onFinish: async ({ status, duration }) => {
               await addRequestLog(c.env.DB, {
                 ip,
@@ -1335,6 +1377,7 @@ openAiRoutes.post("/chat/completions", async (c) => {
           global: settingsBundle.global,
           origin,
           requestedModel,
+          toolNames,
         });
 
         const duration = (Date.now() - start) / 1000;
@@ -1380,6 +1423,322 @@ openAiRoutes.post("/chat/completions", async (c) => {
       key_name: keyName,
       token_suffix: "",
       error: e instanceof Error ? e.message : String(e),
+    });
+    return c.json(openAiError("Internal error", "internal_error"), 500);
+  }
+});
+
+openAiRoutes.post("/responses", async (c) => {
+  const start = Date.now();
+  const ip = getClientIp(c.req.raw);
+  const keyName = c.get("apiAuth").name ?? "Unknown";
+  const origin = new URL(c.req.url).origin;
+  let requestedModel = "";
+
+  try {
+    const body = (await c.req.json()) as {
+      model?: unknown;
+      input?: unknown;
+      instructions?: unknown;
+      stream?: unknown;
+      reasoning?: Record<string, unknown>;
+      tools?: Array<Record<string, unknown>>;
+      tool_choice?: unknown;
+    };
+
+    requestedModel = String(body.model ?? "").trim();
+    if (!requestedModel) return c.json(openAiError("Missing 'model'", "missing_model"), 400);
+    if (!isValidModel(requestedModel) || !isToolCapableModel(requestedModel)) {
+      return c.json(openAiError(`Model '${requestedModel}' not supported`, "model_not_supported"), 400);
+    }
+
+    const messages = parseResponsesInput(body.input, body.instructions);
+    if (!messages.length) return c.json(openAiError("input cannot be empty", "empty_input"), 400);
+
+    const normalizedTools = normalizeResponsesTools(body.tools);
+    const toolChoice = body.tool_choice;
+    const emitThink = String((body.reasoning ?? {}).effort ?? "").trim().toLowerCase() !== "none";
+    const settingsBundle = await getSettings(c.env);
+    const retryCodes = Array.isArray(settingsBundle.grok.retry_status_codes)
+      ? settingsBundle.grok.retry_status_codes
+      : [401, 429];
+    const stream = Boolean(body.stream);
+    let lastErr: string | null = null;
+
+    const quota = await enforceQuota({
+      env: c.env,
+      apiAuth: c.get("apiAuth"),
+      model: requestedModel,
+      kind: "chat",
+    });
+    if (!quota.ok) return quota.resp;
+
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const chosen = await selectBestToken(c.env.DB, requestedModel);
+      if (!chosen) return c.json(openAiError("No available token", "NO_AVAILABLE_TOKEN"), 503);
+
+      const cf = normalizeCfCookie(settingsBundle.grok.cf_clearance ?? "");
+      const cookie = cf ? `sso-rw=${chosen.token};sso=${chosen.token};${cf}` : `sso-rw=${chosen.token};sso=${chosen.token}`;
+      const { content: rawContent, images } = extractContent(messages as any);
+      const { content, toolNames } = applyToolsToPrompt(rawContent, normalizedTools, toolChoice);
+
+      try {
+        const uploads = await mapLimit(images, 5, (url) => uploadImage(url, cookie, settingsBundle.grok));
+        const imgIds = uploads.map((item) => item.fileId).filter(Boolean);
+        const imgUris = uploads.map((item) => item.fileUri).filter(Boolean);
+        const { payload, referer } = buildConversationPayload({
+          requestModel: requestedModel,
+          content,
+          imgIds,
+          imgUris,
+          settings: settingsBundle.grok,
+        });
+        const upstream = await sendConversationRequest({
+          payload,
+          cookie,
+          settings: settingsBundle.grok,
+          ...(referer ? { referer } : {}),
+        });
+
+        if (!upstream.ok) {
+          const txt = await upstream.text().catch(() => "");
+          lastErr = `Upstream ${upstream.status}: ${txt.slice(0, 200)}`;
+          await recordTokenFailure(c.env.DB, chosen.token, upstream.status, txt.slice(0, 200));
+          await applyCooldown(c.env.DB, chosen.token, upstream.status);
+          if (retryCodes.includes(upstream.status) && attempt < 2) continue;
+          break;
+        }
+
+        if (stream) {
+          const openAiStream = createOpenAiStreamFromGrokNdjson(upstream, {
+            cookie,
+            settings: { ...settingsBundle.grok, show_thinking: emitThink },
+            global: settingsBundle.global,
+            origin,
+            requestedModel,
+            toolNames,
+            onFinish: async ({ status, duration }) => {
+              await addRequestLog(c.env.DB, {
+                ip,
+                model: requestedModel,
+                duration: Number(duration.toFixed(2)),
+                status,
+                key_name: keyName,
+                token_suffix: chosen.token.slice(-6),
+                error: status === 200 ? "" : "stream_error",
+              });
+            },
+          });
+          return new Response(createResponsesStreamFromChatStream(openAiStream, requestedModel), {
+            status: 200,
+            headers: streamHeaders(),
+          });
+        }
+
+        const chatJson = await parseOpenAiFromGrokNdjson(upstream, {
+          cookie,
+          settings: { ...settingsBundle.grok, show_thinking: emitThink },
+          global: settingsBundle.global,
+          origin,
+          requestedModel,
+          toolNames,
+        });
+        await addRequestLog(c.env.DB, {
+          ip,
+          model: requestedModel,
+          duration: Number(((Date.now() - start) / 1000).toFixed(2)),
+          status: 200,
+          key_name: keyName,
+          token_suffix: chosen.token.slice(-6),
+          error: "",
+        });
+        return c.json(buildResponsesJsonFromChat(requestedModel, chatJson));
+      } catch (error) {
+        const msg = error instanceof Error ? error.message : String(error);
+        lastErr = msg;
+        await recordTokenFailure(c.env.DB, chosen.token, 500, msg);
+        await applyCooldown(c.env.DB, chosen.token, 500);
+        if (attempt < 2) continue;
+      }
+    }
+
+    await addRequestLog(c.env.DB, {
+      ip,
+      model: requestedModel,
+      duration: Number(((Date.now() - start) / 1000).toFixed(2)),
+      status: 500,
+      key_name: keyName,
+      token_suffix: "",
+      error: lastErr ?? "unknown_error",
+    });
+    return c.json(openAiError(lastErr ?? "Upstream error", "upstream_error"), 500);
+  } catch (error) {
+    await addRequestLog(c.env.DB, {
+      ip,
+      model: requestedModel || "unknown",
+      duration: Number(((Date.now() - start) / 1000).toFixed(2)),
+      status: 500,
+      key_name: keyName,
+      token_suffix: "",
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return c.json(openAiError("Internal error", "internal_error"), 500);
+  }
+});
+
+openAiRoutes.post("/messages", async (c) => {
+  const start = Date.now();
+  const ip = getClientIp(c.req.raw);
+  const keyName = c.get("apiAuth").name ?? "Unknown";
+  const origin = new URL(c.req.url).origin;
+  let requestedModel = "";
+
+  try {
+    const body = (await c.req.json()) as {
+      model?: unknown;
+      messages?: unknown;
+      system?: unknown;
+      stream?: unknown;
+      thinking?: Record<string, unknown>;
+      tools?: Array<Record<string, unknown>>;
+      tool_choice?: unknown;
+    };
+
+    requestedModel = String(body.model ?? "").trim();
+    if (!requestedModel) return c.json(openAiError("Missing 'model'", "missing_model"), 400);
+    if (!isValidModel(requestedModel) || !isToolCapableModel(requestedModel)) {
+      return c.json(openAiError(`Model '${requestedModel}' not supported`, "model_not_supported"), 400);
+    }
+
+    const messages = parseAnthropicInput(body.messages, body.system);
+    if (!messages.length) return c.json(openAiError("messages cannot be empty", "empty_messages"), 400);
+
+    const normalizedTools = normalizeAnthropicTools(body.tools);
+    const toolChoice = normalizeAnthropicToolChoice(body.tool_choice);
+    const emitThink = String((body.thinking ?? {}).type ?? "").trim().toLowerCase() !== "disabled";
+    const settingsBundle = await getSettings(c.env);
+    const retryCodes = Array.isArray(settingsBundle.grok.retry_status_codes)
+      ? settingsBundle.grok.retry_status_codes
+      : [401, 429];
+    const stream = Boolean(body.stream);
+    let lastErr: string | null = null;
+
+    const quota = await enforceQuota({
+      env: c.env,
+      apiAuth: c.get("apiAuth"),
+      model: requestedModel,
+      kind: "chat",
+    });
+    if (!quota.ok) return quota.resp;
+
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const chosen = await selectBestToken(c.env.DB, requestedModel);
+      if (!chosen) return c.json(openAiError("No available token", "NO_AVAILABLE_TOKEN"), 503);
+
+      const cf = normalizeCfCookie(settingsBundle.grok.cf_clearance ?? "");
+      const cookie = cf ? `sso-rw=${chosen.token};sso=${chosen.token};${cf}` : `sso-rw=${chosen.token};sso=${chosen.token}`;
+      const { content: rawContent, images } = extractContent(messages as any);
+      const { content, toolNames } = applyToolsToPrompt(rawContent, normalizedTools, toolChoice);
+
+      try {
+        const uploads = await mapLimit(images, 5, (url) => uploadImage(url, cookie, settingsBundle.grok));
+        const imgIds = uploads.map((item) => item.fileId).filter(Boolean);
+        const imgUris = uploads.map((item) => item.fileUri).filter(Boolean);
+        const { payload, referer } = buildConversationPayload({
+          requestModel: requestedModel,
+          content,
+          imgIds,
+          imgUris,
+          settings: settingsBundle.grok,
+        });
+        const upstream = await sendConversationRequest({
+          payload,
+          cookie,
+          settings: settingsBundle.grok,
+          ...(referer ? { referer } : {}),
+        });
+
+        if (!upstream.ok) {
+          const txt = await upstream.text().catch(() => "");
+          lastErr = `Upstream ${upstream.status}: ${txt.slice(0, 200)}`;
+          await recordTokenFailure(c.env.DB, chosen.token, upstream.status, txt.slice(0, 200));
+          await applyCooldown(c.env.DB, chosen.token, upstream.status);
+          if (retryCodes.includes(upstream.status) && attempt < 2) continue;
+          break;
+        }
+
+        if (stream) {
+          const openAiStream = createOpenAiStreamFromGrokNdjson(upstream, {
+            cookie,
+            settings: { ...settingsBundle.grok, show_thinking: emitThink },
+            global: settingsBundle.global,
+            origin,
+            requestedModel,
+            toolNames,
+            onFinish: async ({ status, duration }) => {
+              await addRequestLog(c.env.DB, {
+                ip,
+                model: requestedModel,
+                duration: Number(duration.toFixed(2)),
+                status,
+                key_name: keyName,
+                token_suffix: chosen.token.slice(-6),
+                error: status === 200 ? "" : "stream_error",
+              });
+            },
+          });
+          return new Response(createAnthropicStreamFromChatStream(openAiStream, requestedModel), {
+            status: 200,
+            headers: streamHeaders(),
+          });
+        }
+
+        const chatJson = await parseOpenAiFromGrokNdjson(upstream, {
+          cookie,
+          settings: { ...settingsBundle.grok, show_thinking: emitThink },
+          global: settingsBundle.global,
+          origin,
+          requestedModel,
+          toolNames,
+        });
+        await addRequestLog(c.env.DB, {
+          ip,
+          model: requestedModel,
+          duration: Number(((Date.now() - start) / 1000).toFixed(2)),
+          status: 200,
+          key_name: keyName,
+          token_suffix: chosen.token.slice(-6),
+          error: "",
+        });
+        return c.json(buildAnthropicJsonFromChat(requestedModel, chatJson));
+      } catch (error) {
+        const msg = error instanceof Error ? error.message : String(error);
+        lastErr = msg;
+        await recordTokenFailure(c.env.DB, chosen.token, 500, msg);
+        await applyCooldown(c.env.DB, chosen.token, 500);
+        if (attempt < 2) continue;
+      }
+    }
+
+    await addRequestLog(c.env.DB, {
+      ip,
+      model: requestedModel,
+      duration: Number(((Date.now() - start) / 1000).toFixed(2)),
+      status: 500,
+      key_name: keyName,
+      token_suffix: "",
+      error: lastErr ?? "unknown_error",
+    });
+    return c.json(openAiError(lastErr ?? "Upstream error", "upstream_error"), 500);
+  } catch (error) {
+    await addRequestLog(c.env.DB, {
+      ip,
+      model: requestedModel || "unknown",
+      duration: Number(((Date.now() - start) / 1000).toFixed(2)),
+      status: 500,
+      key_name: keyName,
+      token_suffix: "",
+      error: error instanceof Error ? error.message : String(error),
     });
     return c.json(openAiError("Internal error", "internal_error"), 500);
   }

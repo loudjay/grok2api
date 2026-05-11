@@ -20,10 +20,6 @@ COPY pyproject.toml uv.lock /app/
 
 RUN uv sync --frozen --no-dev --no-install-project --active
 
-# Pre-install Playwright Chromium + OS deps to make auto-register/solver usable in Docker
-# without doing `apt-get` at runtime.
-RUN python -m playwright install --with-deps chromium
-
 COPY config.defaults.toml /app/config.defaults.toml
 COPY app /app/app
 COPY main.py /app/main.py

@@ -31,6 +31,8 @@ from app.api.v1.image import router as image_router
 from app.api.v1.files import router as files_router
 from app.api.v1.models import router as models_router
 from app.api.v1.uploads import router as uploads_router
+from app.api.v1.responses import router as responses_router
+from app.api.v1.messages import router as messages_router
 from app.services.token import get_scheduler
 
 
@@ -47,7 +49,7 @@ async def lifespan(app: FastAPI):
     """应用生命周期管理"""
 
     # 0. 兼容迁移：保留旧版 data 目录中的配置/缓存等数据
-    from app.core.legacy_migration import migrate_legacy_cache_dirs, migrate_legacy_account_settings
+    from app.core.legacy_migration import migrate_legacy_cache_dirs
 
     await asyncio.to_thread(migrate_legacy_cache_dirs)
 
@@ -55,15 +57,6 @@ async def lifespan(app: FastAPI):
     from app.core.config import config
 
     await config.load()
-
-    # 1.1 Old account post-migration settings (TOS + BirthDate + NSFW), best-effort
-    async def _run_legacy_account_migration():
-        try:
-            await migrate_legacy_account_settings(concurrency=10)
-        except Exception as e:
-            logger.warning(f"Legacy account migration failed: {e}")
-
-    asyncio.create_task(_run_legacy_account_migration())
 
     # 2. 启动服务显示
     logger.info("Starting Grok2API...")
@@ -82,14 +75,6 @@ async def lifespan(app: FastAPI):
 
     # 关闭
     logger.info("Shutting down Grok2API...")
-
-    # Best-effort: stop auto-register to avoid blocking shutdown on background threads.
-    try:
-        from app.services.register import get_auto_register_manager
-
-        await get_auto_register_manager().stop_job()
-    except Exception:
-        pass
 
     from app.core.storage import StorageFactory
 
@@ -129,6 +114,8 @@ def create_app() -> FastAPI:
 
     # 注册路由
     app.include_router(chat_router, prefix="/v1", dependencies=[Depends(verify_api_key)])
+    app.include_router(responses_router, prefix="/v1", dependencies=[Depends(verify_api_key)])
+    app.include_router(messages_router, prefix="/v1", dependencies=[Depends(verify_api_key)])
     app.include_router(image_router, prefix="/v1", dependencies=[Depends(verify_api_key)])
     app.include_router(models_router, prefix="/v1", dependencies=[Depends(verify_api_key)])
     app.include_router(uploads_router, prefix="/v1", dependencies=[Depends(verify_api_key)])

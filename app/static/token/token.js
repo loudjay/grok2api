@@ -8,9 +8,6 @@ let batchTotal = 0;
 let batchProcessed = 0;
 let currentBatchAction = null;
 const BATCH_SIZE = 50;
-let autoRegisterJobId = null;
-let autoRegisterTimer = null;
-let autoRegisterLastAdded = 0;
 let liveStatsTimer = null;
 let isWorkersRuntime = false;
 let isNsfwRefreshAllRunning = false;
@@ -176,20 +173,6 @@ function resetFilters() {
   renderTable();
 }
 
-function setAutoRegisterUiEnabled(enabled) {
-  const btnAuto = document.getElementById('tab-btn-auto');
-  const tabAuto = document.getElementById('add-tab-auto');
-  if (btnAuto) btnAuto.style.display = enabled ? '' : 'none';
-  if (tabAuto) tabAuto.style.display = enabled ? '' : 'none';
-  if (!enabled) {
-    try {
-      switchAddTab('manual');
-    } catch (e) {
-      // ignore
-    }
-  }
-}
-
 function setNsfwRefreshUiEnabled(enabled) {
   const btn = document.getElementById('btn-refresh-nsfw-all');
   if (!btn) return;
@@ -218,12 +201,9 @@ async function detectWorkersRuntime() {
 }
 
 async function applyRuntimeUiFlags() {
-  // Default hide first; show back for local/docker after detection.
-  setAutoRegisterUiEnabled(false);
   setNsfwRefreshUiEnabled(false);
   isWorkersRuntime = await detectWorkersRuntime();
   if (!isWorkersRuntime) {
-    setAutoRegisterUiEnabled(true);
     setNsfwRefreshUiEnabled(true);
   }
 }
@@ -554,7 +534,6 @@ function batchExport() {
 function openAddModal() {
   const modal = document.getElementById('add-modal');
   if (!modal) return;
-  switchAddTab('manual');
   modal.classList.remove('hidden');
   requestAnimationFrame(() => {
     modal.classList.add('is-open');
@@ -575,41 +554,9 @@ function resetAddModal() {
   const tokenInput = document.getElementById('add-token-input');
   const noteInput = document.getElementById('add-token-note');
   const quotaInput = document.getElementById('add-token-quota');
-  const countInput = document.getElementById('auto-register-count');
-  const concurrencyInput = document.getElementById('auto-register-concurrency');
-  const statusEl = document.getElementById('auto-register-status');
-  const autoBtn = document.getElementById('auto-register-btn');
   if (tokenInput) tokenInput.value = '';
   if (noteInput) noteInput.value = '';
   if (quotaInput) quotaInput.value = 80;
-  if (countInput) countInput.value = '';
-  if (concurrencyInput) concurrencyInput.value = 10;
-  if (statusEl) {
-    statusEl.classList.add('hidden');
-    statusEl.textContent = '';
-  }
-  if (autoBtn) autoBtn.disabled = false;
-  stopAutoRegisterPolling();
-}
-
-function switchAddTab(tab) {
-  const manual = document.getElementById('add-tab-manual');
-  const auto = document.getElementById('add-tab-auto');
-  const btnManual = document.getElementById('tab-btn-manual');
-  const btnAuto = document.getElementById('tab-btn-auto');
-  if (!manual || !auto || !btnManual || !btnAuto) return;
-
-  if (tab === 'auto') {
-    manual.classList.add('hidden');
-    auto.classList.remove('hidden');
-    btnManual.classList.remove('active');
-    btnAuto.classList.add('active');
-  } else {
-    auto.classList.add('hidden');
-    manual.classList.remove('hidden');
-    btnAuto.classList.remove('active');
-    btnManual.classList.add('active');
-  }
 }
 
 async function submitManualAdd() {
@@ -649,206 +596,6 @@ async function submitManualAdd() {
   closeAddModal();
   applyFilters();
   loadData();
-}
-
-function stopAutoRegisterPolling() {
-  if (autoRegisterTimer) {
-    clearInterval(autoRegisterTimer);
-    autoRegisterTimer = null;
-  }
-  autoRegisterJobId = null;
-  autoRegisterLastAdded = 0;
-  updateAutoRegisterLogs([]);
-
-  const stopBtn = document.getElementById('auto-register-stop-btn');
-  if (stopBtn) {
-    stopBtn.classList.add('hidden');
-    stopBtn.disabled = false;
-  }
-}
-
-function updateAutoRegisterStatus(text) {
-  const statusEl = document.getElementById('auto-register-status');
-  if (!statusEl) return;
-  statusEl.textContent = text;
-  statusEl.classList.remove('hidden');
-}
-
-function updateAutoRegisterLogs(lines) {
-  const el = document.getElementById('auto-register-logs');
-  if (!el) return;
-  const arr = Array.isArray(lines) ? lines : [];
-  const text = arr.filter(x => typeof x === 'string').join('\n');
-  if (!text) {
-    el.textContent = '';
-    el.classList.add('hidden');
-    return;
-  }
-  el.textContent = text;
-  el.classList.remove('hidden');
-}
-
-async function startAutoRegister() {
-  const btn = document.getElementById('auto-register-btn');
-  if (btn) btn.disabled = true;
-
-  try {
-    const countEl = document.getElementById('auto-register-count');
-    const concurrencyEl = document.getElementById('auto-register-concurrency');
-
-    const pool = 'ssoBasic';
-    let countVal = countEl ? parseInt(countEl.value, 10) : NaN;
-    if (!countVal || Number.isNaN(countVal) || countVal <= 0) countVal = null;
-
-    let concurrencyVal = concurrencyEl ? parseInt(concurrencyEl.value, 10) : NaN;
-    if (!concurrencyVal || Number.isNaN(concurrencyVal) || concurrencyVal <= 0) concurrencyVal = null;
-
-    const res = await fetch('/api/v1/admin/tokens/auto-register', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        ...buildAuthHeaders(apiKey)
-      },
-      body: JSON.stringify({ count: countVal, pool: pool, concurrency: concurrencyVal })
-    });
-
-    if (!res.ok) {
-      const err = await parseJsonSafely(res);
-      showToast(extractApiErrorMessage(err, '启动失败'), 'error');
-      if (btn) btn.disabled = false;
-      return;
-    }
-
-    const data = await res.json();
-    autoRegisterJobId = data.job?.job_id || null;
-    autoRegisterLastAdded = 0;
-    updateAutoRegisterStatus('正在启动注册...');
-    updateAutoRegisterLogs(data.job?.logs || []);
-
-    const stopBtn = document.getElementById('auto-register-stop-btn');
-    if (stopBtn) {
-      stopBtn.classList.remove('hidden');
-      stopBtn.disabled = false;
-    }
-
-    autoRegisterTimer = setInterval(pollAutoRegisterStatus, 2000);
-    pollAutoRegisterStatus();
-  } catch (e) {
-    showToast('启动失败: ' + e.message, 'error');
-    if (btn) btn.disabled = false;
-  }
-}
-
-async function stopAutoRegister() {
-  const stopBtn = document.getElementById('auto-register-stop-btn');
-  if (stopBtn) stopBtn.disabled = true;
-
-  try {
-    if (!autoRegisterJobId) {
-      updateAutoRegisterStatus('当前没有进行中的注册任务');
-      return;
-    }
-
-    const res = await fetch(`/api/v1/admin/tokens/auto-register/stop?job_id=${autoRegisterJobId}`, {
-      method: 'POST',
-      headers: buildAuthHeaders(apiKey)
-    });
-
-    if (!res.ok) {
-      const err = await parseJsonSafely(res);
-      showToast(extractApiErrorMessage(err, '停止失败'), 'error');
-      return;
-    }
-
-    updateAutoRegisterStatus('正在停止...');
-  } catch (e) {
-    showToast('停止失败: ' + e.message, 'error');
-  } finally {
-    if (stopBtn) stopBtn.disabled = false;
-  }
-}
-
-async function pollAutoRegisterStatus() {
-  if (!autoRegisterJobId) return;
-  try {
-    const res = await fetch(`/api/v1/admin/tokens/auto-register/status?job_id=${autoRegisterJobId}`, {
-      headers: buildAuthHeaders(apiKey)
-    });
-    if (!res.ok) {
-      if (res.status === 401) {
-        logout();
-        return;
-      }
-      if (res.status === 404) {
-        updateAutoRegisterStatus('注册任务不存在（可能已结束或服务已重启）');
-        stopAutoRegisterPolling();
-        const btn = document.getElementById('auto-register-btn');
-        if (btn) btn.disabled = false;
-        return;
-      }
-      return;
-    }
-
-    const data = await res.json();
-    updateAutoRegisterLogs(data.logs || []);
-    const status = data.status;
-    if (status === 'idle' || status === 'not_found') {
-      updateAutoRegisterStatus('注册任务已结束');
-      stopAutoRegisterPolling();
-      const btn = document.getElementById('auto-register-btn');
-      if (btn) btn.disabled = false;
-      return;
-    }
-    if (status === 'running' || status === 'starting' || status === 'stopping') {
-      const stopBtn = document.getElementById('auto-register-stop-btn');
-      if (stopBtn) stopBtn.classList.remove('hidden');
-
-      const completed = data.completed || 0;
-      const total = data.total || 0;
-      const added = data.added || 0;
-      const errors = data.errors || 0;
-
-      if (added > autoRegisterLastAdded) {
-        autoRegisterLastAdded = added;
-        loadData(); // 实时刷新 token 列表
-      }
-
-      let msg = `注册中 ${completed}/${total}（已添加 ${added}，失败 ${errors}）`;
-      if (status === 'stopping') msg = `正在停止...（已添加 ${added}，失败 ${errors}）`;
-      if (data.last_error) msg += `，最近错误：${data.last_error}`;
-      updateAutoRegisterStatus(msg);
-      return;
-    }
-
-    if (status === 'completed') {
-      updateAutoRegisterStatus(`注册完成，新增 ${data.added || 0} 个`);
-      showToast('注册完成', 'success');
-      stopAutoRegisterPolling();
-      const btn = document.getElementById('auto-register-btn');
-      if (btn) btn.disabled = false;
-      loadData();
-      return;
-    }
-
-    if (status === 'stopped') {
-      updateAutoRegisterStatus(`注册已停止（已添加 ${data.added || 0}，失败 ${data.errors || 0}）`);
-      stopAutoRegisterPolling();
-      const btn = document.getElementById('auto-register-btn');
-      if (btn) btn.disabled = false;
-      loadData();
-      return;
-    }
-
-    if (status === 'error') {
-      updateAutoRegisterStatus(`注册失败：${data.error || data.last_error || '未知错误'}`);
-      showToast('注册失败', 'error');
-      stopAutoRegisterPolling();
-      const btn = document.getElementById('auto-register-btn');
-      if (btn) btn.disabled = false;
-    }
-  } catch (e) {
-    // ignore transient errors
-  }
 }
 
 

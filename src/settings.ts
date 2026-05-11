@@ -54,29 +54,12 @@ export interface PerformanceSettings {
   admin_assets_batch_size?: number;
 }
 
-export interface RegisterSettings {
-  worker_domain?: string;
-  email_domain?: string;
-  admin_password?: string;
-  yescaptcha_key?: string;
-  solver_url?: string;
-  solver_browser_type?: string;
-  solver_threads?: number;
-  register_threads?: number;
-  default_count?: number;
-  auto_start_solver?: boolean;
-  solver_debug?: boolean;
-  max_errors?: number;
-  max_runtime_minutes?: number;
-}
-
 export interface SettingsBundle {
   global: Required<GlobalSettings>;
   grok: Required<GrokSettings>;
   token: Required<TokenSettings>;
   cache: Required<CacheSettings>;
   performance: Required<PerformanceSettings>;
-  register: Required<RegisterSettings>;
 }
 
 const DEFAULTS: SettingsBundle = {
@@ -126,21 +109,6 @@ const DEFAULTS: SettingsBundle = {
     usage_max_concurrent: 25,
     assets_delete_batch_size: 10,
     admin_assets_batch_size: 10,
-  },
-  register: {
-    worker_domain: "",
-    email_domain: "",
-    admin_password: "",
-    yescaptcha_key: "",
-    solver_url: "http://127.0.0.1:5072",
-    solver_browser_type: "camoufox",
-    solver_threads: 5,
-    register_threads: 10,
-    default_count: 100,
-    auto_start_solver: true,
-    solver_debug: false,
-    max_errors: 0,
-    max_runtime_minutes: 0,
   },
 };
 
@@ -211,12 +179,6 @@ export async function getSettings(env: Env): Promise<SettingsBundle> {
     "SELECT value FROM settings WHERE key = ?",
     ["performance"],
   );
-  const registerRow = await dbFirst<{ value: string }>(
-    env.DB,
-    "SELECT value FROM settings WHERE key = ?",
-    ["register"],
-  );
-
   const globalCfg = globalRow?.value
     ? safeParseJson<GlobalSettings>(globalRow.value, DEFAULTS.global)
     : DEFAULTS.global;
@@ -232,9 +194,6 @@ export async function getSettings(env: Env): Promise<SettingsBundle> {
   const performanceCfg = performanceRow?.value
     ? safeParseJson<PerformanceSettings>(performanceRow.value, DEFAULTS.performance)
     : DEFAULTS.performance;
-  const registerCfg = registerRow?.value
-    ? safeParseJson<RegisterSettings>(registerRow.value, DEFAULTS.register)
-    : DEFAULTS.register;
 
   const mergedGrok = {
     ...DEFAULTS.grok,
@@ -251,7 +210,6 @@ export async function getSettings(env: Env): Promise<SettingsBundle> {
     token: { ...DEFAULTS.token, ...tokenCfg },
     cache: { ...DEFAULTS.cache, ...cacheCfg },
     performance: { ...DEFAULTS.performance, ...performanceCfg },
-    register: { ...DEFAULTS.register, ...registerCfg },
   };
 }
 
@@ -263,7 +221,6 @@ export async function saveSettings(
     token_config?: TokenSettings;
     cache_config?: CacheSettings;
     performance_config?: PerformanceSettings;
-    register_config?: RegisterSettings;
   },
 ): Promise<void> {
   const now = nowMs();
@@ -279,7 +236,6 @@ export async function saveSettings(
   const nextToken: TokenSettings = { ...current.token, ...(updates.token_config ?? {}) };
   const nextCache: CacheSettings = { ...current.cache, ...(updates.cache_config ?? {}) };
   const nextPerformance: PerformanceSettings = { ...current.performance, ...(updates.performance_config ?? {}) };
-  const nextRegister: RegisterSettings = { ...current.register, ...(updates.register_config ?? {}) };
 
   await dbRun(
     env.DB,
@@ -305,11 +261,6 @@ export async function saveSettings(
     env.DB,
     "INSERT INTO settings(key,value,updated_at) VALUES(?,?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at",
     ["performance", JSON.stringify(nextPerformance), now],
-  );
-  await dbRun(
-    env.DB,
-    "INSERT INTO settings(key,value,updated_at) VALUES(?,?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at",
-    ["register", JSON.stringify(nextRegister), now],
   );
 }
 

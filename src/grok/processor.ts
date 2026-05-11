@@ -1,6 +1,9 @@
 import type { GrokSettings, GlobalSettings } from "../settings";
+import type { ParsedToolCall } from "./tooling";
+import { ToolSieve, parseToolCalls } from "./tooling";
 
 type GrokNdjson = Record<string, unknown>;
+type StreamFinishReason = "stop" | "error" | "tool_calls" | null;
 
 function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
@@ -22,7 +25,23 @@ function makeChunk(
   created: number,
   model: string,
   content: string,
-  finish_reason?: "stop" | "error" | null,
+  finish_reason?: StreamFinishReason,
+): string {
+  return makeDeltaChunk(
+    id,
+    created,
+    model,
+    content ? { role: "assistant", content } : {},
+    finish_reason,
+  );
+}
+
+function makeDeltaChunk(
+  id: string,
+  created: number,
+  model: string,
+  delta: Record<string, unknown>,
+  finish_reason?: StreamFinishReason,
 ): string {
   const payload: Record<string, unknown> = {
     id,
@@ -32,7 +51,7 @@ function makeChunk(
     choices: [
       {
         index: 0,
-        delta: content ? { role: "assistant", content } : {},
+        delta,
         finish_reason: finish_reason ?? null,
       },
     ],
@@ -42,6 +61,39 @@ function makeChunk(
 
 function makeDone(): string {
   return "data: [DONE]\n\n";
+}
+
+function makeToolCallChunks(
+  id: string,
+  created: number,
+  model: string,
+  calls: ParsedToolCall[],
+): string[] {
+  const chunks = calls.map((call, index) =>
+    makeDeltaChunk(
+      id,
+      created,
+      model,
+      {
+        role: "assistant",
+        content: null,
+        tool_calls: [
+          {
+            index,
+            id: call.call_id,
+            type: "function",
+            function: {
+              name: call.name,
+              arguments: call.arguments,
+            },
+          },
+        ],
+      },
+    ),
+  );
+  chunks.push(makeDeltaChunk(id, created, model, {}, "tool_calls"));
+  chunks.push(makeDone());
+  return chunks;
 }
 
 function toImgProxyUrl(globalCfg: GlobalSettings, origin: string, path: string): string {
@@ -122,6 +174,7 @@ export function createOpenAiStreamFromGrokNdjson(
     global: GlobalSettings;
     origin: string;
     requestedModel: string;
+    toolNames?: string[];
     onFinish?: (result: { status: number; duration: number }) => Promise<void> | void;
   },
 ): ReadableStream<Uint8Array> {
@@ -135,6 +188,7 @@ export function createOpenAiStreamFromGrokNdjson(
 
   const id = `chatcmpl-${crypto.randomUUID()}`;
   const created = Math.floor(Date.now() / 1000);
+  const sieve = opts.toolNames?.length ? new ToolSieve(opts.toolNames) : null;
 
   const filteredTags = (settings.filtered_tags ?? "")
     .split(",")
@@ -168,6 +222,7 @@ export function createOpenAiStreamFromGrokNdjson(
       let thinkingFinished = false;
       let videoProgressStarted = false;
       let lastVideoProgress = -1;
+      let toolDone = false;
 
       let buffer = "";
 
@@ -377,13 +432,45 @@ export function createOpenAiStreamFromGrokNdjson(
               shouldSkip = true;
             }
 
-            if (!shouldSkip) controller.enqueue(encoder.encode(makeChunk(id, created, currentModel, content)));
+            if (!shouldSkip) {
+              if (sieve && !currentIsThinking) {
+                const { safeText, calls } = sieve.feed(content);
+                if (safeText) {
+                  controller.enqueue(encoder.encode(makeChunk(id, created, currentModel, safeText)));
+                }
+                if (calls) {
+                  for (const chunk of makeToolCallChunks(id, created, currentModel, calls)) {
+                    controller.enqueue(encoder.encode(chunk));
+                  }
+                  toolDone = true;
+                  if (opts.onFinish) {
+                    await opts.onFinish({ status: finalStatus, duration: (Date.now() - startTime) / 1000 });
+                  }
+                  controller.close();
+                  return;
+                }
+              } else {
+                controller.enqueue(encoder.encode(makeChunk(id, created, currentModel, content)));
+              }
+            }
             isThinking = currentIsThinking;
           }
         }
 
-        controller.enqueue(encoder.encode(makeChunk(id, created, currentModel, "", "stop")));
-        controller.enqueue(encoder.encode(makeDone()));
+        if (sieve && !toolDone) {
+          const flushed = sieve.flush();
+          if (flushed.length) {
+            for (const chunk of makeToolCallChunks(id, created, currentModel, flushed)) {
+              controller.enqueue(encoder.encode(chunk));
+            }
+            toolDone = true;
+          }
+        }
+
+        if (!toolDone) {
+          controller.enqueue(encoder.encode(makeChunk(id, created, currentModel, "", "stop")));
+          controller.enqueue(encoder.encode(makeDone()));
+        }
         if (opts.onFinish) await opts.onFinish({ status: finalStatus, duration: (Date.now() - startTime) / 1000 });
         controller.close();
       } catch (e) {
@@ -409,7 +496,14 @@ export function createOpenAiStreamFromGrokNdjson(
 
 export async function parseOpenAiFromGrokNdjson(
   grokResp: Response,
-  opts: { cookie: string; settings: GrokSettings; global: GlobalSettings; origin: string; requestedModel: string },
+  opts: {
+    cookie: string;
+    settings: GrokSettings;
+    global: GlobalSettings;
+    origin: string;
+    requestedModel: string;
+    toolNames?: string[];
+  },
 ): Promise<Record<string, unknown>> {
   const { global, origin, requestedModel, settings } = opts;
   const text = await grokResp.text();
@@ -474,6 +568,32 @@ export async function parseOpenAiFromGrokNdjson(
 
     // For normal chat replies, the first modelResponse is enough.
     break;
+  }
+
+  const toolCalls = opts.toolNames?.length ? parseToolCalls(content, opts.toolNames) : [];
+  if (toolCalls.length) {
+    return {
+      id: `chatcmpl-${crypto.randomUUID()}`,
+      object: "chat.completion",
+      created: Math.floor(Date.now() / 1000),
+      model,
+      choices: [
+        {
+          index: 0,
+          message: {
+            role: "assistant",
+            content: null,
+            tool_calls: toolCalls.map((call) => ({
+              id: call.call_id,
+              type: "function",
+              function: { name: call.name, arguments: call.arguments },
+            })),
+          },
+          finish_reason: "tool_calls",
+        },
+      ],
+      usage: null,
+    };
   }
 
   return {

@@ -24,8 +24,4 @@ dependencies = [
     "sqlalchemy>=2.0.46",
     "tomli>=2.4.0",
     "uvicorn>=0.37.0",
-    "quart>=0.20.0",
-    "rich>=14.3.2",
-    "playwright>=1.58.0",
-    "camoufox>=0.4.11",
 ]
